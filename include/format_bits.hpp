@@ -10,6 +10,18 @@
 [[maybe_unused]] static const char* DELIM="_";
 
 template<typename T>
+inline vector3::vec3<T> from_std_vector(const std::vector<T>& _v){
+    if (_v.size() != 3) throw std::runtime_error("Cannot convert non-length-3-vector");
+    vector3::vec3<T> v;
+    v[0] = _v[0];
+    v[1] = _v[1];
+    v[2] = _v[2];
+    return v;
+}
+
+
+
+template<typename T>
 inline std::string comma_separate(const char* pname, std::vector<T> v){
     std::ostringstream oss;
     oss<<pname<<"=";

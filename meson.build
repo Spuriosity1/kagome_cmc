@@ -1,5 +1,5 @@
 project('kagome_AC_CMC', ['cpp', 'c'],
-  version: '1.1.1',
+  version: '0.0.1',
   meson_version : '>= 1.5.0',
   default_options : [ 'warning_level=3', 'buildtype=release', 'cpp_std=c++2a' ]
 )
@@ -57,6 +57,13 @@ mc_lib = static_library('cmc_lib',
 
 anneal_bin = executable('anneal', 
   files('src/anneal.cpp'),
+  dependencies: g_deps,
+  link_with: mc_lib,
+  include_directories: CMC_inc,
+  install: true
+  )
+
+AC_sus_bin = executable('AC_sus', files('src/AC_sus.cpp'),
   dependencies: g_deps,
   link_with: mc_lib,
   include_directories: CMC_inc,
