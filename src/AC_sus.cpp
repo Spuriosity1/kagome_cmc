@@ -89,10 +89,6 @@ int main (int argc, char *argv[]) {
         .nargs(3)
         .default_value(std::vector<double>({0., 0., 0.}))
         .scan<'g', double>();
-    prog.add_argument("--lifted")
-        .help("Use lifted Metropolis instead of standard Metropolis")
-        .implicit_value(true)
-        .default_value(false);
 
     // PHYSICS
     declare_LJ123(prog);
@@ -152,10 +148,8 @@ int main (int argc, char *argv[]) {
     if (file_id < 0)
         throw std::runtime_error("Failed to create HDF5 file: " + file_path.string());
 
-    const bool use_lifted = prog.get<bool>("--lifted");
     auto sweep = [&](double T_) -> size_t {
-        return use_lifted ? mc.sweep_lifted_Metropolis(T_)
-                          : mc.sweep_local_Metropolis(T_);
+        return mc.sweep_local_Metropolis(T_);
     };
 
     const size_t n_spins = lat.get_objects<HeisenbergSpin>().size();

@@ -73,7 +73,7 @@ anneal -o <output_dir> -s <seed> L <int>
        --T_sample <float> [<float> ...]
        [--T_hot <float>] [--T_cold <float>] [--T_ref <float>]
        [--n_steps <int>] [--n_sweep <int>] [--n_burn_in <int>] [--n_sample <int>]
-       [-B <bx> <by> <bz>] [--lifted] [--prefix <str>] [--save_state]
+       [-B <bx> <by> <bz>] [--prefix <str>] [--save_state]
 ```
 
 | Flag | Default | Description |
@@ -91,7 +91,6 @@ anneal -o <output_dir> -s <seed> L <int>
 | `--n_burn_in` | 16 | Burn-in sweeps at `T_hot` |
 | `--n_sample` | 64 | Sampling rounds at each `T_sample` |
 | `-B / --external_field` | (0,0,0) | External magnetic field vector |
-| `--lifted` | — | Use lifted Metropolis (flip direction on rejection) |
 | `--prefix` | `run` | Filename prefix |
 | `--save_state` | — | Also write the final spin configuration to `.spins.h5` |
 
@@ -118,7 +117,7 @@ AC_sus -o <output_dir> -s <seed> L <int>
        [--deltaB <dx> <dy> <dz>] [-B <bx> <by> <bz>]
        [--T_hot <float>] [--T_ref <float>] [--n_anneal_steps <int>]
        [--n_burn_in <int>] [--n_steps <int>] [--n_sweep <int>]
-       [--lifted] [--prefix <str>] [--save_state]
+       [--prefix <str>] [--save_state]
 ```
 
 | Flag | Default | Description |
@@ -136,7 +135,6 @@ AC_sus -o <output_dir> -s <seed> L <int>
 | `--n_burn_in` | 160 | Burn-in sweeps at `T_hot` |
 | `--n_steps` | 1024 | AC time steps (each = `n_sweep` sweeps) |
 | `--n_sweep / -w` | 16 | MC sweeps per AC time step |
-| `--lifted` | — | Use lifted Metropolis instead of standard Metropolis |
 | `--prefix` | `run` | Filename prefix |
 | `--save_state` | — | Also write the final spin configuration to `.spins.h5` |
 
@@ -178,7 +176,7 @@ with `phase_i = ω·n_sweep·i`. Positive χ″ corresponds to absorption.
 ```
 
 `static_corr` stores raw per-cell DFT correlators **without** sublattice phases;
-these are applied in postprocessing (see `plot_ssf.py`).
+these must be applied downstream (see [Postprocessing](#postprocessing)).
 
 ### `AC_sus` — `<params>.out.h5`
 
@@ -197,42 +195,21 @@ these are applied in postprocessing (see `plot_ssf.py`).
 
 ## Postprocessing
 
-Scripts live in `scripts/`. `plot_common.py` holds shared HDF5-loading helpers.
+The HDF5 outputs are self-describing and can be loaded with `h5py`. Two
+conventions are needed when working with the SSF:
 
-### `scripts/plot_ssf.py`
+- **Sublattice phase correction.** `static_corr` stores raw per-cell DFT
+  correlators without sublattice phases. To recover S(q), multiply by
+  ```
+  w[k, μ, ν] = exp(2πi Σ_j K_j (r_μ − r_ν)_j / k_dims_j)
+  ```
+  where `r_μ` are the sublattice positions (`/ssf/sl_positions`) and `k_dims`
+  is the k-space grid (`@k_dims`), then sum over the sublattice indices μ, ν.
+- **Γ centring.** `fftshift` the k-space grid so the Γ point appears at the
+  centre.
 
-Loads an HDF5 file, applies sublattice phase corrections, and plots 2D k-space
-slices of S(q).
-
-```bash
-python3 scripts/plot_ssf.py <file.h5> [options]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-t / --t-index` | last (coldest) | Temperature index into SSF array |
-| `--slice-axis` | 2 | k-axis to fix for the 2D slice (0/1/2) |
-| `--slice-idx` | 0 | Index along `--slice-axis`; 0 = Γ plane |
-| `--log` | — | Logarithmic colour scale |
-| `--cmap` | inferno | Matplotlib colormap |
-| `-o / --output` | — | Save to PNG instead of displaying |
-
-The script applies the sublattice phase correction
-```
-w[k, μ, ν] = exp(2πi Σ_j K_j (r_μ − r_ν)_j / k_dims_j)
-```
-and fftshifts the result so the Γ point appears at the centre of the plot.
-
-### `scripts/plot_Cv.py`
-
-Plots ⟨E⟩ and the specific heat C_v = (⟨E²⟩ − ⟨E⟩²)/T² versus temperature from
-the `/energy` group.
-
-```bash
-python3 scripts/plot_Cv.py <file.h5> [<file.h5> ...] [-o out.png]
-```
-
-Other scripts: `plot_q_dep.py`, `plot_QaB.py`, `acc_runs.py`, `ltgs_drive.py`.
+Specific heat follows from the `/energy` group as
+C_v = (⟨E²⟩ − ⟨E⟩²)/T².
 
 ## Code structure
 
@@ -251,10 +228,6 @@ src/
   anneal.cpp              Simulated annealing + SSF sampling
   AC_sus.cpp              AC susceptibility protocol
   luttinger_tisza.cpp     Luttinger–Tisza analysis (target currently disabled)
-scripts/
-  plot_ssf.py             SSF visualisation
-  plot_Cv.py              Energy / specific-heat plotting
-  plot_common.py          Shared HDF5 loading utilities
 ```
 
 ## Physics notes
@@ -264,8 +237,7 @@ scripts/
 - **Hamiltonian:** H = Σ_{⟨ij⟩_n} J_n S_i · S_j − B · Σ_i S_i (isotropic
   Heisenberg, in-plane up to third neighbours plus out-of-plane `Jc1`).
 - **Metropolis proposal:** Gaussian kick in ℝ³ re-normalised to the unit sphere;
-  width ∝ √(T/T_ref), with an over-relaxation option and an optional lifted
-  variant (`--lifted`).
+  width ∝ √(T/T_ref), with an over-relaxation step applied after each sweep.
 - **SSF:** S^{αβ}(q) = (1/N) Σ_{μν} e^{iq·(r_μ−r_ν)} ⟨S^α_μ(q) S^{β*}_ν(q)⟩, with
   q on a uniform 3D grid set by `k_dims`.
 ```

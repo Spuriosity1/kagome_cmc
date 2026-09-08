@@ -9,19 +9,18 @@
 
 /*
 This program performs classical Monte Carlo simulated annealing for a spin
-model on the pyrochlore (diamond-based) lattice, using local Metropolis updates.
-The simulation:
+model on the kagome lattice, using local Metropolis updates. The simulation:
 
-1. Constructs a cubic supercell of the diamond lattice.
-2. Defines exchange couplings up to third neighbors.
+1. Constructs a supercell of the kagome lattice.
+2. Defines exchange couplings up to third neighbors (plus interlayer Jc1).
 3. Performs a burn-in at high temperature.
 4. Anneals the system from a hot temperature to a target cold temperature.
-5. Samples static spin–spin correlation functions at the final temperature.
+5. Samples static spin–spin correlation functions at the sample temperatures.
 6. Optionally saves the final spin configuration.
 
 The output consists of:
 
-a. Static structure factor data (.ssf.h5)
+a. Static structure factor data, written to the /ssf group.
 b. Optionally, the final spin state (.spins.h5)
 
  */
@@ -90,11 +89,6 @@ int main (int argc, char *argv[]) {
     prog.add_argument("--prefix")
         .default_value("run");
 
-    prog.add_argument("--lifted")
-        .help("Use lifted Metropolis (flip direction on rejection) instead of standard Metropolis")
-        .implicit_value(true)
-        .default_value(false);
-
     declare_LJ123(prog);
 
     try {
@@ -162,13 +156,11 @@ int main (int argc, char *argv[]) {
 
     ssf_manager ssfm(lat, {"xx", "yy", "zz"}, file_id, "/ssf", T_sample, true);
 
-    const bool use_lifted = prog.get<bool>("--lifted");
     auto sweep = [&](double T_) -> size_t {
-        return use_lifted ? mc.sweep_lifted_Metropolis(T_)
-                          : mc.sweep_local_Metropolis(T_);
+        return mc.sweep_local_Metropolis(T_);
     };
 
-    printf("Done. Begin anneal%s...\n", use_lifted ? " (lifted Metropolis)" : "");
+    printf("Done. Begin anneal...\n");
 
     printf("Burning in (%zu sweeps)...\n", n_burn_in);
     for (size_t i=0; i<n_burn_in; i++){
