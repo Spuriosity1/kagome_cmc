@@ -167,6 +167,11 @@ int main (int argc, char *argv[]) {
     printf("        deltaB=(%.3g,%.3g,%.3g)  |deltaB|=%.4g\n",
            deltaB[0], deltaB[1], deltaB[2], deltaB_mag);
 
+    // Initialisation
+    for (auto& s : lat.get_objects<HeisenbergSpin>()){
+        s.S = {1,0,0};
+    }
+
     ///////////////////////////////////////////////////////////////////////////
     /// Stage 0: burn-in at T_hot
 
