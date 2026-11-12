@@ -12,33 +12,37 @@ namespace CMC {
 
 
     void MC_runner::setup_lattice(){
-        // int coup_idx = 0;
-        for (const auto& c : coupling_specs){
-            // std::cout << "Coupling Index " << coup_idx++ << " -> linking\n";
+        auto& spins = lat->get_objects<HeisenbergSpin>();
+        const int Np = lat->lattice.num_primitive_cells();
+        const int num_sl = static_cast<int>(
+            std::get<SlPos<HeisenbergSpin>>(lat->sl_positions).size());
 
-            auto& spins = lat->get_objects<HeisenbergSpin>();
-            const int Np = lat->lattice.num_primitive_cells();
-            const int num_sl = static_cast<int>(
-                std::get<SlPos<HeisenbergSpin>>(lat->sl_positions).size());
+        // One (initially empty) NeighbourSpins per coupling for every spin;
+        // reverse bonds are added to the target spin during the sweep below.
+        for (auto& s : spins) s.bond_sets.assign(coupling_specs.size(), {});
+
+        for (size_t ci = 0; ci < coupling_specs.size(); ci++) {
+            const auto& c = coupling_specs[ci];
+            const bool per_bond = !c.per_bond.empty();
 
             for (int sl = 0; sl < num_sl; sl++) {
+                const auto& vlist = c.relative_vectors.at(sl);
                 for (int cell = 0; cell < Np; cell++) {
                     HeisenbergSpin* link = &spins[sl * Np + cell];
 
-                    std::vector<HeisenbergSpin*> shell_above;
-                    std::vector<HeisenbergSpin*> shell_below;
-
-                    for (const auto& v : c.relative_vectors.at(sl)) {
+                    for (size_t n = 0; n < vlist.size(); n++) {
                         HeisenbergSpin* other =
-                            lat->get_object_at<HeisenbergSpin>(link->ipos + v);
-                        bool above = other < link;
-                        if (above) {
-                            shell_above.push_back(other);
-                        } else {
-                            shell_below.push_back(other);
-                        }
+                            lat->get_object_at<HeisenbergSpin>(link->ipos + vlist[n]);
+                        // Oriented bond link→other carries matrix M (E = S_linkᵀ M S_other).
+                        const vector3::mat33<double>& M =
+                            per_bond ? c.per_bond[sl][n] : c.J;
+
+                        // Field on link gets M·S_other; field on other gets Mᵀ·S_link.
+                        link->bond_sets[ci].neighbours.push_back(other);
+                        link->bond_sets[ci].coupling.push_back(M);
+                        other->bond_sets[ci].neighbours.push_back(link);
+                        other->bond_sets[ci].coupling.push_back(M.tr());
                     }
-                    link->bond_sets.push_back({shell_above, shell_below});
                 }
             }
         }
@@ -48,15 +52,28 @@ namespace CMC {
 
     void MC_runner::define_coupling(const std::string& name,
             const std::vector<std::vector<ipos_t>>& rel_vecs,
-            const vector3::mat33<double>& J,
-            bool use_pyro_sl_ordering)
+            const vector3::mat33<double>& J)
     {
         if (index.contains(name)){
             throw std::logic_error("Coupling names must be unique");
         }
 
         index[name] = coupling_specs.size();
-        coupling_specs.push_back({name, rel_vecs, J, use_pyro_sl_ordering});
+        coupling_specs.push_back({name, rel_vecs, J, {}});
+    }
+
+
+    void MC_runner::define_coupling(const std::string& name,
+            const std::vector<std::vector<ipos_t>>& rel_vecs,
+            const std::vector<std::vector<vector3::mat33<double>>>& per_bond)
+    {
+        if (index.contains(name)){
+            throw std::logic_error("Coupling names must be unique");
+        }
+
+        index[name] = coupling_specs.size();
+        coupling_specs.push_back({name, rel_vecs,
+                                  vector3::mat33<double>{}, per_bond});
     }
 
 
@@ -75,11 +92,6 @@ namespace CMC {
     }
 
 
-    void accumulate_field(vector3::vec3d& h,
-            const std::vector<HeisenbergSpin*>& spin_list){
-        for (auto& s : spin_list) {h += s->S;}
-    }
-
     double norm(const vector3::vec3d& v){
         return sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
     }
@@ -87,16 +99,11 @@ namespace CMC {
     vector3::vec3d MC_runner::local_field(const HeisenbergSpin *spin) const
     {
         vector3::vec3d h_loc{0,0,0};
-        vector3::vec3d tmp;
-        assert(coupling_specs.size() == spin->bond_sets.size());
-        for (size_t cpl_idx = 0; cpl_idx < coupling_specs.size(); cpl_idx++) {
-            auto J = coupling_specs[cpl_idx].J;
-            tmp = {0,0,0};
-            accumulate_field(tmp, spin->bond_sets[cpl_idx].bonds_above);
-            h_loc += J * tmp;
-            tmp = {0,0,0};
-            accumulate_field(tmp, spin->bond_sets[cpl_idx].bonds_below);
-            h_loc += tmp * J;
+        for (const auto& bs : spin->bond_sets) {
+            const size_t m = bs.neighbours.size();
+            for (size_t i = 0; i < m; i++) {
+                h_loc += bs.coupling[i] * bs.neighbours[i]->S;
+            }
         }
         return h_loc;
     }

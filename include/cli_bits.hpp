@@ -60,34 +60,48 @@ inline auto declare_LJ123(argparse::ArgumentParser& prog){
 }
 
 // Declares the nearest-neighbour Dzyaloshinskii-Moriya options. With these set
-// the NN (J1) coupling becomes the non-symmetric matrix
-//     M = [[J1, dD, D], [-dD, J1, 0], [-D, 0, J1]],
-// i.e. the isotropic J1 plus a DM (antisymmetric) part; --D is the DM strength
-// and --d a dimensionless ratio (so the matrix entry dD = d*D).
+// the NN (J1) bonds carry the symmetry-adapted DM of the kagome layer: a
+// Cartesian DM vector that rotates by the C3 symmetry between bonds (see
+// kagome::dm_J1). It is parametrised by an in-plane strength D1p and an
+// out-of-plane strength D1z, which the CLI flags map onto as
+//     D1p = -D,   D1z = d*D,
+// i.e. --D sets the overall DM scale and --d the out-of-plane / in-plane ratio.
 //
-// NOTE: here --D is the DM strength. The DC protocol's single-ion anisotropy
-// uses a separate flag, --D_sia (see declare_cuboid_and_aniso), so there is no
-// collision; declare_DM is used only by anneal / AC_sus / ltgs (never DC).
+// NOTE: the DC protocol's single-ion anisotropy uses a separate flag, --D_sia
+// (see declare_cuboid_and_aniso), so there is no collision; declare_DM is used
+// only by anneal / AC_sus / ltgs (never DC).
 inline void declare_DM(argparse::ArgumentParser& prog){
     prog.add_argument("--D")
-        .help("Nearest-neighbour Dzyaloshinskii-Moriya strength (off-diagonal "
-              "NN coupling). Default 0.")
+        .help("Nearest-neighbour Dzyaloshinskii-Moriya strength (in-plane "
+              "component D1p = -D). Default 0.")
         .default_value(0.)
         .scan<'g', double>();
     prog.add_argument("--d")
-        .help("Dimensionless DM anisotropy ratio; NN matrix entry dD = d*D. "
-              "Default 0.")
+        .help("Dimensionless DM anisotropy ratio; out-of-plane component "
+              "D1z = d*D. Default 0.")
         .default_value(0.)
         .scan<'g', double>();
 }
 
-// Nearest-neighbour coupling matrix: isotropic J1 plus the DM part, following
-//   H_bond = S_hi^T M S_lo,   M = [[J1, dD, D], [-dD, J1, 0], [-D, 0, J1]]
-// where "hi"/"lo" are the higher/lower-sublattice spins of the bond. The MC's
-// sublattice-major memory layout fixes this orientation (see build_mc_run).
-inline mat33d nn_coupling_matrix(double J1, double D, double d){
-    const double dD = d * D;
-    return mat33d::from_cols({J1, -dD, -D}, {dD, J1, 0.}, {D, 0., J1});
+// Cartesian DM matrix: S_i . dm_matrix(D) . S_j = D . (S_i × S_j).
+inline mat33d dm_matrix(const vector3::vec3d& D){
+    return mat33d::from_cols({0., -D[2], D[1]},
+                             {D[2], 0., -D[0]},
+                             {-D[1], D[0], 0.});
+}
+
+// Per-bond NN coupling matrices, parallel to kagome::vecs["J1"]: isotropic J1
+// plus the symmetry-adapted DM of kagome::dm_J1 (CLI mapping D1p=-D, D1z=d*D).
+// The oriented bond sl→target carries H_bond = J1 S_sl·S_t + D·(S_sl×S_t).
+inline std::vector<std::vector<mat33d>>
+nn_coupling_per_bond(double J1, double D, double d){
+    const double D1p = -D, D1z = d * D;
+    const auto dm = kagome::dm_J1(D1p, D1z);
+    std::vector<std::vector<mat33d>> out(dm.size());
+    for (size_t sl = 0; sl < dm.size(); sl++)
+        for (const auto& Dv : dm[sl])
+            out[sl].push_back(J1 * coupling::Heis + dm_matrix(Dv));
+    return out;
 }
 
 // Filename fragment for the DM parameters (only when explicitly set).
@@ -136,7 +150,10 @@ inline uint64_t int_from_hex_str(const std::string& seed_s){
 
 inline auto build_lat(const argparse::ArgumentParser& prog){
     int L = prog.get<int>("L");
-    auto supercell_spec = imat33_t::from_cols({2*L,0,0},{L,2*L,0},{0,0,L});
+    // Orthogonal L×L×L supercell (in primitive-cell units). The interlayer ABC
+    // shift is carried by the primitive cell's a3, so no supercell shear is
+    // needed — this matches the notebook's simple N1×N2×N3 fractional supercell.
+    auto supercell_spec = imat33_t::from_cols({2*L,0,0},{0,2*L,0},{0,0,L});
     auto cell_spec = KagomeLayer();
     return build_supercell(cell_spec, supercell_spec);
 }
@@ -211,12 +228,11 @@ inline std::map<std::string, double> get_J(const argparse::ArgumentParser& prog)
 }
 
 
-// D_dm / d_dm add a Dzyaloshinskii-Moriya term to the NN (J1) coupling (default
-// off). The non-symmetric matrix is well-defined on the lattice because spins
-// are laid out sublattice-major (idx = sl*Np + cell), so for every inter-
-// sublattice bond the higher-sublattice spin has the higher pointer: the
-// bonds_above/bonds_below split applies M to S_hi^T M S_lo and M^T to the
-// reverse, giving a consistent per-bond orientation. See nn_coupling_matrix.
+// D_dm / d_dm add the symmetry-adapted Dzyaloshinskii-Moriya term to the NN
+// (J1) bonds (default off). Each oriented NN bond carries its own DM matrix
+// (nn_coupling_per_bond); setup_lattice gives the source spin that matrix and
+// the target spin its transpose, so the (non-symmetric) bond is felt correctly
+// from both ends.
 inline auto build_mc_run(const argparse::ArgumentParser& prog, CMC::Lattice& lat,
         uint64_t seed, double D_dm = 0.0, double d_dm = 0.0){
 
@@ -239,10 +255,10 @@ inline auto build_mc_run(const argparse::ArgumentParser& prog, CMC::Lattice& lat
         if (cn == "J1") continue; // NN coupling handled below (may carry DM)
         if (abs(v) > 1e-10) mc.define_coupling(cn, kagome::vecs.at(cn), v*coupling::Heis);
     }
-    // Nearest-neighbour coupling: isotropic J1 plus the (optional) DM matrix.
+    // Nearest-neighbour coupling: isotropic J1 plus the (optional) symmetry DM.
     if (dm_active || abs(J1val) > 1e-10){
         mc.define_coupling("J1", kagome::vecs.at("J1"),
-                           nn_coupling_matrix(J1val, D_dm, d_dm));
+                           nn_coupling_per_bond(J1val, D_dm, d_dm));
     }
 
     mc.settings.T_ref = prog.get<double>("--T_ref");

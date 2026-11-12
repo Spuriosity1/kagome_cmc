@@ -34,10 +34,12 @@ using namespace std;
 // β→α (displacement −d, matrix Jᵀ). That makes M(k) Hermitian by construction
 // and counts every undirected bond twice, which is what the ½ gives back.
 //
-// Bond orientation (DM sign): the directed bond from the higher-sublattice spin
-// to the lower one carries the matrix M, the reverse carries Mᵀ. This matches
-// the MC convention H_bond = S_hiᵀ M S_lo (set by the sublattice-major memory
-// layout; see cli_bits::build_mc_run), so ltgs and the MC share a Hamiltonian.
+// Bond orientation: the listed bond sl→target (source = the sublattice that
+// lists it in kagome::vecs) carries matrix M (H_bond = S_slᵀ M S_target); its
+// Hermitian partner target→sl carries Mᵀ. For J1 the DM part makes M
+// non-symmetric and bond dependent (kagome::dm_J1); every other shell is
+// isotropic Heisenberg. This matches the MC exactly (cli_bits::build_mc_run,
+// setup_lattice), so ltgs and the MC share a Hamiltonian.
 
 // Precomputed directed bond for the LT matrix.
 struct LTBond {
@@ -46,6 +48,15 @@ struct LTBond {
     Eigen::Matrix3d J;            // 3×3 coupling matrix for this directed bond
 };
 
+// Cartesian DM matrix: S_i · dm_matrix(D) · S_j = D · (S_i × S_j).
+static Eigen::Matrix3d eigen_dm(const vector3::vec3d& D){
+    Eigen::Matrix3d m;
+    m <<  0.0,   D[2], -D[1],
+         -D[2],  0.0,   D[0],
+          D[1], -D[0],  0.0;
+    return m;
+}
+
 static vector<LTBond> build_bonds(
         LatticeIndexing& lat,
         const vector<ipos_t>& sl_pos,
@@ -53,31 +64,17 @@ static vector<LTBond> build_bonds(
         double D_dm, double d_dm)
 {
     const int n_sl = static_cast<int>(sl_pos.size());
-
-    // Canonical (higher-sl → lower-sl) 3×3 matrix for each active coupling.
-    std::vector<std::pair<std::string, Eigen::Matrix3d>> specs;
-
-    const double J1val = J.count("J1") ? J.at("J1") : 0.0;
-    const double dD    = d_dm * D_dm;
-    const bool dm_active = (std::abs(D_dm) > 1e-12 || std::abs(dD) > 1e-12);
-    if (dm_active || std::abs(J1val) > 1e-10) {
-        Eigen::Matrix3d M;
-        M <<  J1val,  dD,     D_dm,
-             -dD,     J1val,  0.0,
-             -D_dm,   0.0,    J1val;
-        specs.emplace_back("J1", M);
-    }
-    for (const auto& [cn, v] : J) {
-        if (cn == "J1") continue;
-        if (std::abs(v) > 1e-10)
-            specs.emplace_back(cn, v * Eigen::Matrix3d::Identity());
-    }
-
     vector<LTBond> bonds;
-    for (const auto& [cn, Mc] : specs) {
-        const auto& dist = kagome::vecs.at(cn); // per-sublattice displacement table
+
+    // Emit a shell: each listed bond sl→β as a directed bond plus its Hermitian
+    // partner β→sl (displacement −v, matrix Mᵀ). M(k) is Hermitian by
+    // construction and every undirected bond is counted twice (the ½ in
+    // E_per_spin). `Mbond(sl,n)` returns the matrix of the n-th bond of sl.
+    auto emit = [&](const std::string& cn, auto&& Mbond) {
+        const auto& dist = kagome::vecs.at(cn);
         for (int sl = 0; sl < n_sl; sl++) {
-            for (const auto& v : dist[sl]) {
+            for (size_t n = 0; n < dist[sl].size(); n++) {
+                const ipos_t v = dist[sl][n];
                 ipos_t ref = sl_pos[sl] + v;
                 lat.get_supercell_IDX(ref); // wrap ref into the primitive cell
                 int beta = -1;
@@ -85,18 +82,37 @@ static vector<LTBond> build_bonds(
                     if (sl_pos[s] == ref) { beta = s; break; }
                 }
                 assert(beta >= 0 && "bond target not found in sl_positions");
-                // Higher-sl source → carry M; lower-sl source → carry Mᵀ.
-                Eigen::Matrix3d Jb = (sl > beta) ? Mc : Mc.transpose();
-                // Emit the directed bond α→β together with its Hermitian partner
-                // β→α (displacement −v, matrix Jbᵀ). This makes M(k) Hermitian by
-                // construction (block[β,α] = block[α,β]†) and counts every
-                // undirected bond twice, which is what the ½ in E_per_spin assumes.
-                ipos_t vneg{-v[0], -v[1], -v[2]};
-                bonds.push_back({sl, beta, v, Jb});
-                bonds.push_back({beta, sl, vneg, Jb.transpose()});
+                const Eigen::Matrix3d M = Mbond(sl, n);
+                const ipos_t vneg{-v[0], -v[1], -v[2]};
+                bonds.push_back({sl, beta, v, M});
+                bonds.push_back({beta, sl, vneg, M.transpose()});
             }
         }
+    };
+
+    // Isotropic Heisenberg shells (everything except the NN DM).
+    for (const auto& [cn, v] : J) {
+        if (cn == "J1") continue;
+        if (std::abs(v) > 1e-10) {
+            const Eigen::Matrix3d Iso = v * Eigen::Matrix3d::Identity();
+            emit(cn, [&](int, size_t){ return Iso; });
+        }
     }
+
+    // Nearest neighbour: isotropic J1 plus the symmetry-adapted DM, per bond.
+    const double J1val = J.count("J1") ? J.at("J1") : 0.0;
+    const double D1p = -D_dm, D1z = d_dm * D_dm;
+    const bool dm_active = (std::abs(D_dm) > 1e-12 || std::abs(D1z) > 1e-12);
+    if (dm_active || std::abs(J1val) > 1e-10) {
+        const auto dm = kagome::dm_J1(D1p, D1z);
+        // Explicit Matrix3d return type: deducing `auto` would return an Eigen
+        // expression template holding a dangling reference to the eigen_dm
+        // temporary (zeroing the DM part at evaluation time).
+        emit("J1", [&](int sl, size_t n) -> Eigen::Matrix3d {
+            return J1val * Eigen::Matrix3d::Identity() + eigen_dm(dm[sl][n]);
+        });
+    }
+
     return bonds;
 }
 
@@ -138,12 +154,12 @@ int main(int argc, char* argv[])
     const imat33_t supercell = imat33_t::from_cols({L,0,0},{0,L,0},{0,0,L});
     LatticeIndexing lat(prim_cell, supercell);
 
-    // Sublattice positions (kagome: 3 sites per cell). Wrap each into the
-    // primitive cell so positions match what get_supercell_IDX returns. The
-    // index order (0,1,2) matches KagomeLayer()'s pyro_sl, hence the MC's
-    // sublattice-major layout — so "higher-sl" means the same thing here.
+    // Sublattice positions (kagome: 3 sites per cell), taken from the shared
+    // geometry. Wrap each into the primitive cell so positions match what
+    // get_supercell_IDX returns. The index order (0,1,2) matches KagomeLayer()'s
+    // pyro_sl, hence the MC's sublattice-major layout.
     vector<ipos_t> sl_pos;
-    for (const auto& p : std::vector<ipos_t>{ {0,0,0}, {1,0,0}, {1,1,0} }) {
+    for (const auto& p : kagome::sl_pos) {
         ipos_t pos = p;
         lat.wrap_primitive(pos);
         sl_pos.push_back(pos);
@@ -169,9 +185,19 @@ int main(int argc, char* argv[])
     idx3_t k_star_idx{};
     Eigen::VectorXcd eigvec_star(M_dim);
 
+    const auto recip = lat.get_reciprocal_lattice_vectors();
+
     for (int k_flat = 0; k_flat < Nk; k_flat++) {
         const idx3_t Q   = lat.idx3_from_flat(k_flat);
-        const auto k_vec = lat.wavevector_from_idx3(Q);
+        // Bloch phase from the UNFOLDED Q. wavevector_from_idx3 folds
+        // K[a] -= size(a) to centre k at 0, but the kagome sublattices sit at
+        // half-cell positions, so that fold shifts k by a reciprocal vector of
+        // the index cell whose dot with an odd bond displacement is an odd
+        // multiple of π. That gauge phase cancels for the real Heisenberg
+        // blocks but corrupts the complex DM part, so we keep k self-consistent
+        // by not folding here (folding is only a cosmetic recentreing).
+        const vector3::vec3d Qd{(double)Q[0], (double)Q[1], (double)Q[2]};
+        const vector3::vec3d k_vec = recip * Qd;
 
         MatC M = MatC::Zero(M_dim, M_dim);
         for (const auto& b : bonds) {

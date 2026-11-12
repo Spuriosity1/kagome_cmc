@@ -23,11 +23,18 @@ using json=nlohmann::json;
 struct HeisenbergSpin;
 
 /**
- * @brief Collection of neighboring spins connected by a given bond shell.
+ * @brief Neighbours of a spin for one coupling shell, each with its own
+ *        (already oriented) coupling matrix.
+ *
+ * The contribution of this shell to the spin's local field is
+ *     h += Σ_i coupling[i] · neighbours[i]->S.
+ * For an oriented bond source→target carrying matrix M (H_bond = S_srcᵀ M S_tgt)
+ * the source stores M for the target, and the target stores Mᵀ for the source,
+ * so each undirected bond is felt — with the correct orientation — by both ends.
  */
 struct NeighbourSpins {
-    std::vector<HeisenbergSpin*> bonds_above;
-    std::vector<HeisenbergSpin*> bonds_below;
+    std::vector<HeisenbergSpin*>             neighbours;
+    std::vector<vector3::mat33<double>>      coupling;
 };
 
 
@@ -35,14 +42,10 @@ struct NeighbourSpins {
  * @brief Classical Heisenberg spin stored in the supercell.
  *
  * Satisfies the GeometricObject concept via the `ipos` member.
- *
- * Bond orientation convention:
- *  - bonds_above: neighbor pointer < this pointer
- *  - bonds_below: neighbor pointer >= this pointer
  */
 struct HeisenbergSpin {
     ipos_t ipos;                           // required by GeometricObject concept
-    int pyro_sl = 0;                       // pyrochlore sublattice 0–3
+    int pyro_sl = 0;                       // kagome sublattice 0–2
     vector3::vec3<double> S;
     std::vector<NeighbourSpins> bond_sets;
     // If true this spin is frozen: Metropolis/overrelaxation skip it. Used to
@@ -51,7 +54,7 @@ struct HeisenbergSpin {
 };
 
 /**
- * @brief Supercell of Heisenberg spins on the pyrochlore lattice.
+ * @brief Supercell of Heisenberg spins on the kagome lattice.
  */
 typedef Supercell<HeisenbergSpin> Lattice;
 
@@ -59,17 +62,21 @@ typedef Supercell<HeisenbergSpin> Lattice;
 /**
  * @brief Specification of a single coupling term in the Hamiltonian.
  *
- * relative_vectors[sl] lists displacement vectors from a spin of pyrochlore
- * sublattice sl (0–3) to its coupled neighbors.
+ * relative_vectors[sl] lists displacement vectors from a spin of sublattice sl
+ * to its coupled neighbours (each undirected bond listed once; see kagome.hpp).
+ *
+ * The coupling matrix of the oriented bond sl→target is
+ *   - per_bond[sl][n]           if per_bond is non-empty (same shape as
+ *                               relative_vectors), used for the anisotropic NN
+ *                               bond whose DM matrix varies bond-to-bond, or
+ *   - J                         otherwise (a single matrix shared by every bond
+ *                               in the shell, e.g. isotropic Heisenberg).
  */
 struct CouplingSpec {
     std::string name;
     std::vector<std::vector<ipos_t>> relative_vectors;
     vector3::mat33<double> J;
-    // If true, bonds_above/bonds_below are split by pyro_sl ordering (lower
-    // pyro_sl → bonds_above) rather than pointer ordering. Required for
-    // non-symmetric J matrices (e.g. local-frame XXZ).
-    bool use_pyro_sl_ordering = false;
+    std::vector<std::vector<vector3::mat33<double>>> per_bond;
 };
 
 struct MC_parameters {
@@ -118,10 +125,16 @@ public:
 
     double total_energy_per_unit_cell() const;
 
+    // Shell with a single coupling matrix shared by every bond (e.g. Heisenberg).
     void define_coupling(const std::string& name,
             const std::vector<std::vector<ipos_t>>& rel_vecs,
-            const vector3::mat33<double>& J,
-            bool use_pyro_sl_ordering = false);
+            const vector3::mat33<double>& J);
+
+    // Shell with a per-bond coupling matrix (same shape as rel_vecs). Used for
+    // the NN bond whose Dzyaloshinskii–Moriya matrix rotates between bonds.
+    void define_coupling(const std::string& name,
+            const std::vector<std::vector<ipos_t>>& rel_vecs,
+            const std::vector<std::vector<vector3::mat33<double>>>& per_bond);
 
     void set_global_field(const vector3::vec3<double>& h);
     vector3::vec3d get_global_field() const;
