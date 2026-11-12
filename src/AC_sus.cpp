@@ -84,6 +84,12 @@ int main (int argc, char *argv[]) {
         .help("Number of MC sweeps per AC time step")
         .default_value(static_cast<size_t>(16))
         .scan<'i', size_t>();
+    prog.add_argument("--step_size")
+        .help("Metropolis proposal width (Gaussian kick std dev) for the "
+              "time-evolution stage; sets the physical time increment per "
+              "sweep. Smaller = finer time resolution but slower evolution.")
+        .default_value(0.1)
+        .scan<'g', double>();
     prog.add_argument("--deltaB")
         .help("AC field amplitude and direction (3 components)")
         .nargs(3)
@@ -92,6 +98,7 @@ int main (int argc, char *argv[]) {
 
     // PHYSICS
     declare_LJ123(prog);
+    declare_DM(prog);
 
     try {
         prog.parse_args(argc, argv);
@@ -116,9 +123,11 @@ int main (int argc, char *argv[]) {
     const double omega        = prog.get<double>("--omega");
     const size_t n_steps      = prog.get<size_t>("--n_steps");
     const size_t n_sweep      = prog.get<size_t>("--n_sweep");
+    const double step_size    = prog.get<double>("--step_size");
 
     auto lat = build_lat(prog);
-    auto mc  = build_mc_run(prog, lat, seed);
+    auto mc  = build_mc_run(prog, lat, seed,
+                            prog.get<double>("--D"), prog.get<double>("--d"));
 
     const auto B_vec     = prog.get<std::vector<double>>("-B");
     const auto dB_vec    = prog.get<std::vector<double>>("--deltaB");
@@ -131,7 +140,7 @@ int main (int argc, char *argv[]) {
 
     std::stringstream name;
     name << prog.get<std::string>("--prefix") << DELIM
-         << name_LJ123(prog)
+         << name_LJ123(prog) << name_DM(prog)
          << "B="  << B_vec[0] << "," << B_vec[1] << "," << B_vec[2] << DELIM
          << "dB=" << dB_vec[0] << "," << dB_vec[1] << "," << dB_vec[2] << DELIM
          << "om=" << omega << DELIM
@@ -148,8 +157,14 @@ int main (int argc, char *argv[]) {
     if (file_id < 0)
         throw std::runtime_error("Failed to create HDF5 file: " + file_path.string());
 
-    auto sweep = [&](double T_) -> size_t {
-        return mc.sweep_local_Metropolis(T_);
+    // Stages 0-1 (burn-in, anneal) equilibrate fast using overrelaxation.
+    // Stage 2 (AC drive) uses pure Metropolis with a fixed step so that one
+    // sweep is a fixed increment of physical (overdamped) time.
+    auto equilibrate = [&](double T_) -> size_t {
+        return mc.sweep_equilibrate(T_);
+    };
+    auto evolve = [&](double T_) -> size_t {
+        return mc.sweep_dynamics(T_, step_size);
     };
 
     const size_t n_spins = lat.get_objects<HeisenbergSpin>().size();
@@ -158,12 +173,19 @@ int main (int argc, char *argv[]) {
            prog.get<int>("L"), n_spins, omega, n_steps, n_sweep);
     printf("        T_hot=%.3g  T_sample=%.3g  n_anneal=%zu  n_burn_in=%zu\n",
            T_hot, T_sample, n_anneal, n_burn_in);
-    printf("        deltaB=(%.3g,%.3g,%.3g)  |deltaB|=%.4g\n",
-           deltaB[0], deltaB[1], deltaB[2], deltaB_mag);
+    printf("        deltaB=(%.3g,%.3g,%.3g)  |deltaB|=%.4g  step_size=%.4g\n",
+           deltaB[0], deltaB[1], deltaB[2], deltaB_mag, step_size);
 
-    // Initialisation
+    // Initialisation: two-domain seed — left half +z, right half -z — so the
+    // run starts with a single domain wall near mid-x. Split on the integer
+    // x-coordinate (ipos[0]), matching DC.cpp. Note there is no pinning here,
+    // so the wall is free to drift or annihilate during burn-in / annealing.
+    int nx = 0;
+    for (const auto& s : lat.get_objects<HeisenbergSpin>())
+        nx = std::max(nx, static_cast<int>(s.ipos[0]) + 1);
     for (auto& s : lat.get_objects<HeisenbergSpin>()){
-        s.S = {1,0,0};
+        const int x = static_cast<int>(s.ipos[0]);
+        s.S = (x < nx / 2) ? vector3::vec3d{0,0,1} : vector3::vec3d{0,0,-1};
     }
 
     ///////////////////////////////////////////////////////////////////////////
@@ -171,7 +193,7 @@ int main (int argc, char *argv[]) {
 
     printf("\nBurning in (%zu sweeps at T=%.3g)...\n", n_burn_in, T_hot);
     for (size_t i = 0; i < n_burn_in; i++)
-        sweep(T_hot);
+        equilibrate(T_hot);
 
     ///////////////////////////////////////////////////////////////////////////
     /// Stage 1: anneal from T_hot to T_sample
@@ -183,7 +205,7 @@ int main (int argc, char *argv[]) {
         size_t accepted = 0;
         e_manager.new_T(T);
         for (size_t n = 0; n < n_sweep; n++)
-            accepted += sweep(T);
+            accepted += equilibrate(T);
         double e = mc.total_energy_per_unit_cell();
         e_manager.sample(e);
         printf("[anneal] %4zu  T=%.3e  E=%.3e  acc=%.1f%%\n",
@@ -220,7 +242,7 @@ int main (int argc, char *argv[]) {
 
         size_t accepted = 0;
         for (size_t n = 0; n < n_sweep; n++)
-            accepted += sweep(T_sample);
+            accepted += evolve(T_sample);
 
         // Measure per-spin magnetisation
         double M[3] = {0, 0, 0};

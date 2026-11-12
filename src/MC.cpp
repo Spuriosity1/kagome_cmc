@@ -68,6 +68,12 @@ namespace CMC {
         return global_field;
     }
 
+    void MC_runner::set_anisotropy(double D, const vector3::vec3d& axis){
+        aniso_D = D;
+        double n = sqrt(dot(axis, axis));
+        aniso_axis = (n > 1e-12) ? (axis / n) : vector3::vec3d{0,0,1};
+    }
+
 
     void accumulate_field(vector3::vec3d& h,
             const std::vector<HeisenbergSpin*>& spin_list){
@@ -108,17 +114,27 @@ namespace CMC {
         v = c * v + ((1-c)/norm2) * dot(axis, v) * axis + (s / sqrt(norm2)) * cross(axis, v);
     }
 
-    size_t MC_runner::local_Metropolis(double T, HeisenbergSpin* spin)
+    size_t MC_runner::local_Metropolis(double T, HeisenbergSpin* spin, double sigma)
     {
+        if (spin->pinned) return 0;
+
         auto h_loc = local_field(spin) - global_field;
         double curr_E = dot(spin->S, h_loc);
 
-        auto new_S = sqrt(T/settings.T_ref) * vector3::vec3d(
+        auto new_S = sigma * vector3::vec3d(
                 normal_dist(rng), normal_dist(rng), normal_dist(rng));
         new_S += spin->S;
         new_S /= norm(new_S);
 
         double new_E = dot(new_S, h_loc);
+
+        // Single-ion easy-axis anisotropy -aniso_D (S.axis)^2 (on-site only).
+        if (aniso_D != 0.0) {
+            const double p_old = dot(spin->S, aniso_axis);
+            const double p_new = dot(new_S,   aniso_axis);
+            curr_E += -aniso_D * p_old * p_old;
+            new_E  += -aniso_D * p_new * p_new;
+        }
 
         double dE = new_E - curr_E;
         if (dE < 0 || rand01(rng) < exp(-dE / T)) {
@@ -135,6 +151,7 @@ namespace CMC {
 
         for (int i=0; i<p*spins.size(); ++i) {
             auto* spin = &spins[site_dist(rng)];
+            if (spin->pinned) continue;
             auto h_loc = local_field(spin) - global_field;
             mirror_about_vector(spin->S, h_loc);
         }
@@ -147,17 +164,42 @@ namespace CMC {
 
         for (size_t i=0; i<spins.size(); ++i) {
             auto* spin = &spins[i];
+            if (spin->pinned) continue;
             auto h_loc = local_field(spin) - global_field;
             rotate_about_vector(spin->S, h_loc, 2*M_PI*rand01(rng));
         }
     }
 
-    size_t MC_runner::sweep_local_Metropolis(double T){
+    size_t MC_runner::sweep_equilibrate(double T){
+        const double sigma = sqrt(T / settings.T_ref);
         size_t accepted = 0;
         for (auto& spin : lat->get_objects<HeisenbergSpin>()){
-            accepted += local_Metropolis(T, &spin);
+            accepted += local_Metropolis(T, &spin, sigma);
         }
         overrelax_all();
+        return accepted;
+    }
+
+    size_t MC_runner::sweep_metropolis(double T){
+        const double sigma = sqrt(T / settings.T_ref);
+        size_t accepted = 0;
+        for (auto& spin : lat->get_objects<HeisenbergSpin>()){
+            accepted += local_Metropolis(T, &spin, sigma);
+        }
+        return accepted;
+    }
+
+    size_t MC_runner::sweep_dynamics(double T, double sigma){
+        auto& spins = lat->get_objects<HeisenbergSpin>();
+        const size_t N = spins.size();
+        size_t accepted = 0;
+        // Random-sequential (Glauber / Model-A) update: N random single-spin
+        // attempts per sweep. Unlike a deterministic typewriter sweep this
+        // imposes no directional bias on the dynamics (e.g. on domain-wall
+        // motion), at the cost of leaving some spins untouched each sweep.
+        for (size_t i = 0; i < N; ++i) {
+            accepted += local_Metropolis(T, &spins[site_dist(rng)], sigma);
+        }
         return accepted;
     }
 
@@ -166,6 +208,10 @@ namespace CMC {
         for (const auto& s : std::get<std::vector<HeisenbergSpin>>(lat->objects)){
             E += 0.5 * dot(s.S, local_field(&s));
             E -= dot(s.S, global_field);
+            if (aniso_D != 0.0) {
+                const double p = dot(s.S, aniso_axis);
+                E += -aniso_D * p * p;
+            }
         }
         return E / lat->lattice.num_primitive_cells();
     }
@@ -261,6 +307,8 @@ namespace CMC {
 
     H5Gclose(grp);
 }
+
+
 
 
 } // end namespace

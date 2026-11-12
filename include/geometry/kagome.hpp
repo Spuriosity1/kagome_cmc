@@ -55,10 +55,19 @@ namespace kagome {
         {{2,0,0}}
     }},
 
+    // Interlayer coupling, first out-of-plane shell. Co3Sn2S2 is rhombohedral
+    // (R-3m): successive kagome layers are ABC-stacked, each shifted in-plane by
+    // the rhombohedral vector +-(2/3 a1 + 1/3 a2). An interlayer bond therefore
+    // connects DIFFERENT sublattices (a naive AA c-axis bond {0,0,1} would wrongly
+    // link a site to its own sublattice). Each site has two nearest neighbours in
+    // the layer above (listed here) and two below (the reverse bonds, supplied
+    // automatically). Only the bond TOPOLOGY is physical: the integer embedding
+    // keeps every layer at the same in-plane coordinates (a shear of the true ABC
+    // structure), preserving the connectivity graph but not the metric.
     {"Jc1", {
-        {{0,0,1}},
-        {{0,0,1}},
-        {{0,0,1}}
+        {{1,0,1},{1,1,1}}, // SL 0 @ (0,0,0) -> SL1, SL2 above
+        {{1,0,1},{2,1,1}}, // SL 1 @ (1,0,0) -> SL0, SL2 above
+        {{1,1,1},{2,1,1}}  // SL 2 @ (1,1,0) -> SL0, SL1 above
     }}
     };
 

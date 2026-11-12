@@ -13,9 +13,6 @@ fftw_dep = dependency('fftw3', required: true)
 
 hdf5_dep = dependency('hdf5', required: true, language: 'cpp')
 
-
-# mpi_dep = dependency('mpi', include_type: 'system', required: build_pt)
-
 cc=meson.get_compiler('c')
 
 # Detect whether HDF5 was built with MPI support
@@ -29,8 +26,8 @@ if cc.compiles('''
 
     message('Serial HDF5 detected')
 else
-  # pull in MPI
-
+  # Parallel HDF5 pulls in MPI, so require it and fold it into the dependency.
+    mpi_dep = dependency('mpi', include_type: 'system', language: 'cpp', required: true)
     hdf5_dep = declare_dependency(
         dependencies: [hdf5_dep, mpi_dep]
     )
@@ -47,7 +44,6 @@ g_deps = [
     fftw_dep,
     hdf5_dep
     ]
-
 
 mc_lib = static_library('cmc_lib',
   files('src/MC.cpp'),
@@ -70,15 +66,53 @@ AC_sus_bin = executable('AC_sus', files('src/AC_sus.cpp'),
   install: true
   )
 
+DC_bin = executable('DC', files('src/DC.cpp'),
+  dependencies: g_deps,
+  link_with: mc_lib,
+  include_directories: CMC_inc,
+  install: true
+  )
+
 eigen_dep = dependency('eigen3', required: true, include_type: 'system')
 
-# ltgs_bin = executable('ltgs',
-#   files('src/luttinger_tisza.cpp'),
-#   dependencies: g_deps + [eigen_dep],
-#   link_with: mc_lib,
-#   include_directories: CMC_inc,
-#   install: true
-#   )
-#
+ltgs_bin = executable('ltgs',
+  files('src/luttinger_tisza.cpp'),
+  dependencies: g_deps + [eigen_dep],
+  link_with: mc_lib,
+  include_directories: CMC_inc,
+  install: true
+  )
+
+py_scripts = ['ltgs_plot', 'ltgs_sweep']
+script_dir = get_option('datadir') / 'kagome_cmc' / 'scripts'
+
+if get_option('dev')
+  # Point directly at the source tree so edits take effect without reinstalling.
+  foreach s : py_scripts
+    install_symlink(s,
+      pointing_to: meson.project_source_root() / 'results' / s + '.py',
+      install_dir: get_option('bindir'),
+    )
+  endforeach
+else
+  install_data(
+    files(
+      'results/ltgs_plot.py',
+      'results/ltgs_sweep.py',
+    ),
+    install_dir: script_dir,
+    install_mode: 'rwxr-xr-x',
+  )
+  # Absolute, prefix-derived target so the symlink resolves under whatever
+  # prefix/datadir was configured (join drops prefix if datadir is absolute).
+  foreach s : py_scripts
+    install_symlink(s,
+      pointing_to: get_option('prefix') / script_dir / s + '.py',
+      install_dir: get_option('bindir'),
+    )
+  endforeach
+endif
+
+
 # subdir('test')
 

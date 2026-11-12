@@ -45,6 +45,9 @@ struct HeisenbergSpin {
     int pyro_sl = 0;                       // pyrochlore sublattice 0–3
     vector3::vec3<double> S;
     std::vector<NeighbourSpins> bond_sets;
+    // If true this spin is frozen: Metropolis/overrelaxation skip it. Used to
+    // impose Dirichlet boundary conditions that pin a domain wall (see DC.cpp).
+    bool pinned = false;
 };
 
 /**
@@ -83,6 +86,11 @@ class MC_runner {
 
     vector3::vec3<double> global_field={0,0,0};
 
+    // Single-ion easy-axis anisotropy  H_aniso = -aniso_D * sum_i (S_i . axis)^2.
+    // aniso_D > 0 is easy-axis (favours alignment along ±axis); default off.
+    double aniso_D = 0.0;
+    vector3::vec3d aniso_axis = {0,0,1};
+
     Lattice* lat;
 
     std::uniform_int_distribution<size_t> site_dist;
@@ -118,13 +126,42 @@ public:
     void set_global_field(const vector3::vec3<double>& h);
     vector3::vec3d get_global_field() const;
 
+    // Sets the single-ion easy-axis anisotropy -D (S.axis)^2. axis need not be
+    // normalised; it is normalised internally.
+    void set_anisotropy(double D, const vector3::vec3d& axis);
+
     void setup_lattice();
 
-    size_t local_Metropolis(double T, HeisenbergSpin* spin);
+    // Single-spin Metropolis update. `sigma` is the standard deviation of the
+    // Gaussian kick applied to S before re-normalisation onto the unit sphere.
+    size_t local_Metropolis(double T, HeisenbergSpin* spin, double sigma);
 
     void overrelax_all();
     void overrelax_some(double p);
-    size_t sweep_local_Metropolis(double T);
+
+    // Equilibrium sweep: one Metropolis pass with adaptive proposal width
+    // sigma = sqrt(T/T_ref) followed by a microcanonical overrelaxation pass.
+    // Decorrelates quickly but is NOT a physical time evolution (overrelaxation
+    // instantaneously re-randomises the transverse spin component). Use only for
+    // burn-in, annealing, and equilibrium sampling.
+    size_t sweep_equilibrate(double T);
+
+    // Pure-Metropolis equilibration sweep: one Metropolis pass over all spins
+    // with adaptive proposal width sigma = sqrt(T/T_ref) and NO overrelaxation.
+    // Required when single-ion anisotropy is active: overrelaxation reflects
+    // spins about the exchange local field and is microcanonical only for the
+    // exchange+Zeeman energy, so it would break detailed balance in the
+    // presence of the on-site anisotropy term. Pinned spins are skipped.
+    size_t sweep_metropolis(double T);
+
+    // Dynamics sweep: N random-sequential single-spin Metropolis attempts
+    // (Glauber / Model-A update) with a fixed proposal width `sigma` and no
+    // overrelaxation. Random site selection avoids the directional bias of a
+    // typewriter sweep. One sweep is then a fixed increment of (overdamped)
+    // physical time, suitable for time-dependent measurements such as AC
+    // susceptibility. Smaller `sigma` → finer time resolution and a cleaner
+    // Langevin correspondence, at the cost of slower evolution per sweep.
+    size_t sweep_dynamics(double T, double sigma);
 };
 
 

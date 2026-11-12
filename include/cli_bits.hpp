@@ -2,6 +2,7 @@
 #include "format_bits.hpp"
 #include "vec3.hpp"
 #include <algorithm>
+#include <array>
 #include <argparse/argparse.hpp>
 #include <cmath>
 #include <filesystem>
@@ -58,6 +59,73 @@ inline auto declare_LJ123(argparse::ArgumentParser& prog){
         .scan<'g', double>();
 }
 
+// Declares the nearest-neighbour Dzyaloshinskii-Moriya options. With these set
+// the NN (J1) coupling becomes the non-symmetric matrix
+//     M = [[J1, dD, D], [-dD, J1, 0], [-D, 0, J1]],
+// i.e. the isotropic J1 plus a DM (antisymmetric) part; --D is the DM strength
+// and --d a dimensionless ratio (so the matrix entry dD = d*D).
+//
+// NOTE: here --D is the DM strength. The DC protocol's single-ion anisotropy
+// uses a separate flag, --D_sia (see declare_cuboid_and_aniso), so there is no
+// collision; declare_DM is used only by anneal / AC_sus / ltgs (never DC).
+inline void declare_DM(argparse::ArgumentParser& prog){
+    prog.add_argument("--D")
+        .help("Nearest-neighbour Dzyaloshinskii-Moriya strength (off-diagonal "
+              "NN coupling). Default 0.")
+        .default_value(0.)
+        .scan<'g', double>();
+    prog.add_argument("--d")
+        .help("Dimensionless DM anisotropy ratio; NN matrix entry dD = d*D. "
+              "Default 0.")
+        .default_value(0.)
+        .scan<'g', double>();
+}
+
+// Nearest-neighbour coupling matrix: isotropic J1 plus the DM part, following
+//   H_bond = S_hi^T M S_lo,   M = [[J1, dD, D], [-dD, J1, 0], [-D, 0, J1]]
+// where "hi"/"lo" are the higher/lower-sublattice spins of the bond. The MC's
+// sublattice-major memory layout fixes this orientation (see build_mc_run).
+inline mat33d nn_coupling_matrix(double J1, double D, double d){
+    const double dD = d * D;
+    return mat33d::from_cols({J1, -dD, -D}, {dD, J1, 0.}, {D, 0., J1});
+}
+
+// Filename fragment for the DM parameters (only when explicitly set).
+inline std::string name_DM(const argparse::ArgumentParser& prog){
+    std::stringstream s;
+    if (prog.is_used("--D")) s << "D=" << prog.get<double>("--D") << DELIM;
+    if (prog.is_used("--d")) s << "d=" << prog.get<double>("--d") << DELIM;
+    return s.str();
+}
+
+// Declares the single-ion easy-axis anisotropy options for the anneal / AC
+// protocols:  H += -D_sia * sum_i (S_i . axis)^2.  Default off (D_sia=0) so
+// existing runs are unchanged. These share the --D_sia / --easy_axis names used
+// by the DC protocol (declare_cuboid_and_aniso) but, since each binary builds its
+// own parser, there is no collision; they are kept separate because anneal does
+// not want DC's cuboid / pinning flags. NOTE: the on-site term breaks the
+// microcanonical overrelaxation step's detailed balance, so anneal must use the
+// pure-Metropolis sweep (sweep_metropolis), which it already does.
+inline void declare_single_ion_aniso(argparse::ArgumentParser& prog){
+    prog.add_argument("--D_sia")
+        .help("Single-ion easy-axis anisotropy strength (H += -D_sia (S.axis)^2). "
+              "D_sia>0 is easy-axis. Default 0 (off).")
+        .default_value(0.).scan<'g', double>();
+    prog.add_argument("--easy_axis")
+        .help("Easy axis direction (3 components, need not be normalised). "
+              "Default (0,0,1).")
+        .nargs(3)
+        .default_value(std::vector<double>({0.,0.,1.}))
+        .scan<'g', double>();
+}
+
+// Filename fragment for the single-ion anisotropy (only when explicitly set).
+inline std::string name_aniso(const argparse::ArgumentParser& prog){
+    std::stringstream s;
+    if (prog.is_used("--D_sia")) s << "Dsia=" << prog.get<double>("--D_sia") << DELIM;
+    return s.str();
+}
+
 inline uint64_t int_from_hex_str(const std::string& seed_s){
     uint64_t seed; // ugly hack for loading seed as hex
     std::stringstream ss;
@@ -71,6 +139,56 @@ inline auto build_lat(const argparse::ArgumentParser& prog){
     auto supercell_spec = imat33_t::from_cols({2*L,0,0},{L,2*L,0},{0,0,L});
     auto cell_spec = KagomeLayer();
     return build_supercell(cell_spec, supercell_spec);
+}
+
+// Declares the extra options used by the DC / domain-wall protocol: independent
+// cuboid dimensions (each defaulting to the cubic L when unset), the by-hand
+// single-ion easy-axis anisotropy strength/axis, and the pinned-slab thickness.
+inline void declare_cuboid_and_aniso(argparse::ArgumentParser& prog){
+    prog.add_argument("--Lx")
+        .help("Linear dimension along x (wall normal). Defaults to L.")
+        .default_value(-1).scan<'i', int>();
+    prog.add_argument("--Ly")
+        .help("Linear dimension along y. Defaults to L.")
+        .default_value(-1).scan<'i', int>();
+    prog.add_argument("--Lz")
+        .help("Linear dimension along z (stacking axis). Defaults to L.")
+        .default_value(-1).scan<'i', int>();
+    prog.add_argument("--D_sia")
+        .help("Single-ion easy-axis anisotropy strength (H += -D_sia (S.axis)^2). "
+              "D_sia>0 is easy-axis. Default 1.36 (physical Co3Sn2S2 value).")
+        .default_value(1.36).scan<'g', double>();
+    prog.add_argument("--easy_axis")
+        .help("Easy axis direction (3 components, need not be normalised)")
+        .nargs(3)
+        .default_value(std::vector<double>({0.,0.,1.}))
+        .scan<'g', double>();
+    prog.add_argument("--pin_thickness")
+        .help("Thickness (in integer x units) of each pinned end slab. Must be "
+              ">= the max bond range in x (=2) for clean open-BC behaviour.")
+        .default_value(2).scan<'i', int>();
+}
+
+// Builds an ORTHOGONAL cuboid supercell {2Lx,0,0},{0,2Ly,0},{0,0,Lz}. Unlike
+// build_lat (which shears the second vector), this keeps transverse wrapping
+// from shifting x, so an x-resolved domain-wall profile is well defined.
+inline auto build_cuboid_lat(const argparse::ArgumentParser& prog){
+    int L  = prog.get<int>("L");
+    int Lx = prog.get<int>("--Lx"); if (Lx < 0) Lx = L;
+    int Ly = prog.get<int>("--Ly"); if (Ly < 0) Ly = L;
+    int Lz = prog.get<int>("--Lz"); if (Lz < 0) Lz = L;
+    auto supercell_spec = imat33_t::from_cols({2*Lx,0,0},{0,2*Ly,0},{0,0,Lz});
+    auto cell_spec = KagomeLayer();
+    return build_supercell(cell_spec, supercell_spec);
+}
+
+// Convenience: resolve the (possibly-defaulted) cuboid dimensions.
+inline std::array<int,3> get_cuboid_dims(const argparse::ArgumentParser& prog){
+    int L  = prog.get<int>("L");
+    int Lx = prog.get<int>("--Lx"); if (Lx < 0) Lx = L;
+    int Ly = prog.get<int>("--Ly"); if (Ly < 0) Ly = L;
+    int Lz = prog.get<int>("--Lz"); if (Lz < 0) Lz = L;
+    return {Lx, Ly, Lz};
 }
 
 inline uint64_t hash_true_random(uint64_t seed_id){
@@ -93,7 +211,14 @@ inline std::map<std::string, double> get_J(const argparse::ArgumentParser& prog)
 }
 
 
-inline auto build_mc_run(const argparse::ArgumentParser& prog, CMC::Lattice& lat, uint64_t seed){
+// D_dm / d_dm add a Dzyaloshinskii-Moriya term to the NN (J1) coupling (default
+// off). The non-symmetric matrix is well-defined on the lattice because spins
+// are laid out sublattice-major (idx = sl*Np + cell), so for every inter-
+// sublattice bond the higher-sublattice spin has the higher pointer: the
+// bonds_above/bonds_below split applies M to S_hi^T M S_lo and M^T to the
+// reverse, giving a consistent per-bond orientation. See nn_coupling_matrix.
+inline auto build_mc_run(const argparse::ArgumentParser& prog, CMC::Lattice& lat,
+        uint64_t seed, double D_dm = 0.0, double d_dm = 0.0){
 
     vector3::vec3d global_field;
     {
@@ -107,9 +232,17 @@ inline auto build_mc_run(const argparse::ArgumentParser& prog, CMC::Lattice& lat
     mc.set_global_field(global_field);
 
     auto J = get_J(prog);
+    const double J1val = J.count("J1") ? J.at("J1") : 0.0;
+    const bool dm_active = (std::abs(D_dm) > 1e-12 || std::abs(d_dm * D_dm) > 1e-12);
 
     for (const auto& [cn, v] : J ){
+        if (cn == "J1") continue; // NN coupling handled below (may carry DM)
         if (abs(v) > 1e-10) mc.define_coupling(cn, kagome::vecs.at(cn), v*coupling::Heis);
+    }
+    // Nearest-neighbour coupling: isotropic J1 plus the (optional) DM matrix.
+    if (dm_active || abs(J1val) > 1e-10){
+        mc.define_coupling("J1", kagome::vecs.at("J1"),
+                           nn_coupling_matrix(J1val, D_dm, d_dm));
     }
 
     mc.settings.T_ref = prog.get<double>("--T_ref");

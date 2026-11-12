@@ -4,6 +4,7 @@
 #include "cli_bits.hpp"
 #include "ssf_manager.hpp"
 #include "energy_manager.hpp"
+#include "order_param_manager.hpp"
 #include "geometry/kagome.hpp"
 #include "format_bits.hpp"
 
@@ -86,10 +87,18 @@ int main (int argc, char *argv[]) {
         .default_value(static_cast<size_t>(64))
         .help("Number of sweeps to run at T_cold while collecting statistics")
         .scan<'i', size_t>();
+    prog.add_argument("--n_equil")
+        .help("Number of sweeps to equilibrate at each new temperature before "
+              "collecting statistics (per-T burn-in). Too small and the "
+              "specific heat is inflated by the cooling transient.")
+        .default_value(static_cast<size_t>(256))
+        .scan<'i', size_t>();
     prog.add_argument("--prefix")
         .default_value("run");
 
     declare_LJ123(prog);
+    declare_DM(prog);
+    declare_single_ion_aniso(prog);
 
     try {
         prog.parse_args(argc, argv);
@@ -123,11 +132,21 @@ int main (int argc, char *argv[]) {
     const size_t n_sweep = prog.get<size_t>("--n_sweep");
     const size_t n_burn_in = prog.get<size_t>("--n_burn_in");
     const size_t n_sample = prog.get<size_t>("--n_sample");
+    const size_t n_equil = prog.get<size_t>("--n_equil");
 
     double T = T_hot;
 
     auto lat = build_lat(prog);
-    auto mc = build_mc_run(prog, lat, seed);
+    auto mc = build_mc_run(prog, lat, seed,
+                           prog.get<double>("--D"), prog.get<double>("--d"));
+
+    // Single-ion easy-axis anisotropy: H += -D_sia (S.axis)^2. Off (D_sia=0) by
+    // default. anneal sweeps with sweep_metropolis, which keeps detailed balance
+    // under this on-site term.
+    const double D_sia = prog.get<double>("--D_sia");
+    const vector3::vec3d easy_axis =
+        from_std_vector(prog.get<std::vector<double>>("--easy_axis"));
+    mc.set_anisotropy(D_sia, easy_axis);
 
     auto B = prog.get<std::vector<double>>("-B");
     if (B.size() < 3){
@@ -135,7 +154,7 @@ int main (int argc, char *argv[]) {
     }
     // Parameter specification complete. Set the name...
     std::stringstream name; // accumulates hashed options
-    name << prog.get<std::string>("--prefix")<<DELIM<<name_LJ123(prog)<<
+    name << prog.get<std::string>("--prefix")<<DELIM<<name_LJ123(prog)<<name_DM(prog)<<name_aniso(prog)<<
         "B="<<B[0]<<","<<B[1]<<","<<B[2]<<DELIM<<
         "seed="<<seed<<DELIM<<
         "Tc="<<T_cold<<DELIM<<
@@ -143,6 +162,7 @@ int main (int argc, char *argv[]) {
 
     auto [T_grid, S_idx] = generate_T_profile(T_hot, T_cold, T_sample, n_steps);
     energy_manager e_manager;
+    order_manager  o_manager(lat);
 
     // Create the output file before the sampling loop so ssf_manager can
     // pre-allocate static_corr on disk and write each temperature's data
@@ -157,7 +177,7 @@ int main (int argc, char *argv[]) {
     ssf_manager ssfm(lat, {"xx", "yy", "zz"}, file_id, "/ssf", T_sample, true);
 
     auto sweep = [&](double T_) -> size_t {
-        return mc.sweep_local_Metropolis(T_);
+        return mc.sweep_metropolis(T_);
     };
 
     printf("Done. Begin anneal...\n");
@@ -169,13 +189,28 @@ int main (int argc, char *argv[]) {
 
     for (size_t i=0; i<T_grid.size(); ++i){
         T = T_grid[i];
-        size_t accepted=0;
         e_manager.new_T(T);
-        for (size_t n=0; n<n_sweep; n++){
-            accepted += sweep(T);
+        o_manager.new_T(T);
+
+        // Equilibrate at this temperature BEFORE measuring. The configuration
+        // arrives still relaxed to the previous (hotter) step; sampling while
+        // it relaxes injects the cooling transient into Var(E) and inflates the
+        // specific heat. This per-T burn-in is what lets each fixed-T chain
+        // converge before we read off statistics.
+        for (size_t n=0; n<n_equil; n++){
+            sweep(T);
         }
-        double e = mc.total_energy_per_unit_cell();
-        e_manager.sample(e);
+
+        size_t accepted_Cv=0;
+        for (size_t s=0; s<n_sample; s++){
+            // Decorrelate first, then measure — never sample the stale
+            // inherited configuration.
+            for (size_t n=0; n<n_sweep; n++){
+                accepted_Cv += sweep(T);
+            }
+            e_manager.sample(mc.total_energy_per_unit_cell());
+            o_manager.sample();
+        }
 
         if (S_idx.contains(i)){
             printf("Sampling at T=%lf (%zu sweeps)...\n", T, n_sample);
@@ -194,12 +229,14 @@ int main (int argc, char *argv[]) {
 
         double E = e_manager.curr_E();
         printf("[anneal] Iter %4zu T=%.3e E=%3e Acceptance rate: %.2f%%\n", 
-                i, T, E, accepted*100.0/lat.get_objects<HeisenbergSpin>().size()/n_sweep);
+                i, T, E, accepted_Cv*100.0/lat.get_objects<HeisenbergSpin>().size()/(
+                    n_sweep * n_sample) );
 
     }
 
     ssfm.write_group(file_id, "/ssf");
     e_manager.write_group(file_id, "/energy");
+    o_manager.write_group(file_id, "/order");
     write_geometry_group(file_id, lat);
     H5Fclose(file_id);
     std::cout<<"Saved to \n"<< file_path<<std::endl;

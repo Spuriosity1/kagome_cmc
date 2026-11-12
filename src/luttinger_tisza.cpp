@@ -1,5 +1,8 @@
 #include <complex>
 #include <limits>
+#include <map>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -10,70 +13,87 @@
 #include "H5Tpublic.h"
 
 #include "cli_bits.hpp"
-#include "geometry/pyrochlore.hpp"
+#include "geometry/kagome.hpp"
 #include "format_bits.hpp"
 
-// LatticeIndexing lives in supercell.hpp (included via cli_bits → pyrochlore_geometry → MC.hpp)
+// LatticeIndexing lives in supercell.hpp (included via cli_bits → kagome → MC.hpp).
 // We use it directly; no Supercell<HeisenbergSpin> is ever constructed.
 
 using namespace std;
 
+// Luttinger–Tisza analysis for the kagome spin model.
+//
+// The exchange couplings are in general anisotropic 3×3 matrices (the NN/J1
+// bond carries a Dzyaloshinskii–Moriya part; the rest are isotropic Heisenberg),
+// so the Fourier-transformed coupling matrix M(k) is (3·n_sl)×(3·n_sl) complex
+// Hermitian: block M[3α:3α+3, 3β:3β+3] accumulates J_bond·e^{ik·d} over directed
+// bonds α→β. The LT lower bound on the energy per spin is ½·min_k λ_min(M(k)).
+//
+// Each undirected bond is listed once in kagome::vecs (from one end only), so
+// build_bonds emits it twice: the directed bond α→β and its Hermitian partner
+// β→α (displacement −d, matrix Jᵀ). That makes M(k) Hermitian by construction
+// and counts every undirected bond twice, which is what the ½ gives back.
+//
+// Bond orientation (DM sign): the directed bond from the higher-sublattice spin
+// to the lower one carries the matrix M, the reverse carries Mᵀ. This matches
+// the MC convention H_bond = S_hiᵀ M S_lo (set by the sublattice-major memory
+// layout; see cli_bits::build_mc_run), so ltgs and the MC share a Hamiltonian.
+
 // Precomputed directed bond for the LT matrix.
-// For XXZ, J is a 3×3 matrix, so M(k) is (3·n_sl)×(3·n_sl) complex Hermitian.
-// Each undirected bond appears twice (once per direction), so the physical
-// energy per spin is (1/2)·λ_min.
 struct LTBond {
-    int    alpha, beta;      // source / target sublattice (0..n_sl-1)
-    ipos_t disp;             // full integer displacement from alpha to beta
-    Eigen::Matrix3d J;       // 3×3 coupling matrix
+    int             alpha, beta;  // source / target sublattice (0 .. n_sl-1)
+    ipos_t          disp;         // full integer displacement from alpha to beta
+    Eigen::Matrix3d J;            // 3×3 coupling matrix for this directed bond
 };
 
 static vector<LTBond> build_bonds(
         LatticeIndexing& lat,
         const vector<ipos_t>& sl_pos,
-        double J1, double J2, double J3, double Delta)
+        const std::map<std::string, double>& J,
+        double D_dm, double d_dm)
 {
-    using DistTable = const vector<vector<ipos_t>>;
-    // {coupling strength, distance table, is_J1 (XXZ applies only to J1)}
-    const struct { double j; DistTable* dist; bool xxz; } specs[] = {
-        {J1, &pyrochlore::nn1_dist,  true},
-        {J2, &pyrochlore::nn2_dist,  false},
-        {J3, &pyrochlore::nn3a_dist, false},
-        {J3, &pyrochlore::nn3b_dist, false},
-    };
-
     const int n_sl = static_cast<int>(sl_pos.size());
-    vector<LTBond> bonds;
 
-    for (auto& [j, dist, xxz] : specs) {
-        if (j == 0.0) continue;
+    // Canonical (higher-sl → lower-sl) 3×3 matrix for each active coupling.
+    std::vector<std::pair<std::string, Eigen::Matrix3d>> specs;
+
+    const double J1val = J.count("J1") ? J.at("J1") : 0.0;
+    const double dD    = d_dm * D_dm;
+    const bool dm_active = (std::abs(D_dm) > 1e-12 || std::abs(dD) > 1e-12);
+    if (dm_active || std::abs(J1val) > 1e-10) {
+        Eigen::Matrix3d M;
+        M <<  J1val,  dD,     D_dm,
+             -dD,     J1val,  0.0,
+             -D_dm,   0.0,    J1val;
+        specs.emplace_back("J1", M);
+    }
+    for (const auto& [cn, v] : J) {
+        if (cn == "J1") continue;
+        if (std::abs(v) > 1e-10)
+            specs.emplace_back(cn, v * Eigen::Matrix3d::Identity());
+    }
+
+    vector<LTBond> bonds;
+    for (const auto& [cn, Mc] : specs) {
+        const auto& dist = kagome::vecs.at(cn); // per-sublattice displacement table
         for (int sl = 0; sl < n_sl; sl++) {
-            const int pyro_sl = sl % 4;
-            for (const auto& v : (*dist)[pyro_sl]) {
+            for (const auto& v : dist[sl]) {
                 ipos_t ref = sl_pos[sl] + v;
-                lat.get_supercell_IDX(ref);
+                lat.get_supercell_IDX(ref); // wrap ref into the primitive cell
                 int beta = -1;
                 for (int s = 0; s < n_sl; s++) {
                     if (sl_pos[s] == ref) { beta = s; break; }
                 }
                 assert(beta >= 0 && "bond target not found in sl_positions");
-
-                Eigen::Matrix3d J_mat;
-                if (xxz && Delta != 1.0) {
-                    // J_bond = j·[I + (Delta-1)·ẑ_μ ⊗ ẑ_ν]
-                    // where μ = pyro_sl of source, ν = pyro_sl of target
-                    int mu = sl   % 4;
-                    int nu = beta % 4;
-                    const auto& zm = pyrochlore::axis[mu][2];
-                    const auto& zn = pyrochlore::axis[nu][2];
-                    Eigen::Vector3d z_mu(zm[0], zm[1], zm[2]);
-                    Eigen::Vector3d z_nu(zn[0], zn[1], zn[2]);
-                    J_mat = j * (Eigen::Matrix3d::Identity()
-                                 + (Delta - 1.0) * z_mu * z_nu.transpose());
-                } else {
-                    J_mat = j * Eigen::Matrix3d::Identity();
-                }
-                bonds.push_back({sl, beta, v, J_mat});
+                // Higher-sl source → carry M; lower-sl source → carry Mᵀ.
+                Eigen::Matrix3d Jb = (sl > beta) ? Mc : Mc.transpose();
+                // Emit the directed bond α→β together with its Hermitian partner
+                // β→α (displacement −v, matrix Jbᵀ). This makes M(k) Hermitian by
+                // construction (block[β,α] = block[α,β]†) and counts every
+                // undirected bond twice, which is what the ½ in E_per_spin assumes.
+                ipos_t vneg{-v[0], -v[1], -v[2]};
+                bonds.push_back({sl, beta, v, Jb});
+                bonds.push_back({beta, sl, vneg, Jb.transpose()});
             }
         }
     }
@@ -89,6 +109,7 @@ int main(int argc, char* argv[])
         .help("Path to output directory");
 
     declare_LJ123(prog);
+    declare_DM(prog);
 
     try {
         prog.parse_args(argc, argv);
@@ -97,7 +118,6 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    
     filesystem::path outdir;
     if (prog.is_used("--output_dir")){
         const string outdir_s = prog.get<string>("output_dir");
@@ -106,41 +126,40 @@ int main(int argc, char* argv[])
             throw runtime_error("output_dir does not exist: " + outdir_s);
     }
 
-    const double J1    = prog.get<double>("--J1");
-    const double J2    = prog.get<double>("--J2");
-    const double J3    = resolve_J3(prog);
-    const double Delta = prog.get<double>("--Delta");
+    const std::map<std::string, double> J = get_J(prog);
+    const double D_dm = prog.get<double>("--D");
+    const double d_dm = prog.get<double>("--d");
 
     // Build LatticeIndexing directly — no Supercell<HeisenbergSpin> needed.
+    // Primitive cell matches KagomeLayer(); a diagonal L×L×L supercell (in
+    // primitive-cell units) gives a clean L³ k-grid for the BZ sweep.
     const int L = prog.get<int>("L");
-    const imat33_t prim_cell  = imat33_t::from_cols({8,0,0},{0,8,0},{0,0,8});
-    const imat33_t supercell  = imat33_t::from_cols({L,0,0},{0,L,0},{0,0,L});
+    const imat33_t prim_cell = imat33_t::from_cols({2,0,0},{0,2,0},{0,0,1});
+    const imat33_t supercell = imat33_t::from_cols({L,0,0},{0,L,0},{0,0,L});
     LatticeIndexing lat(prim_cell, supercell);
 
-    // Sublattice positions: 4 FCC sites × 4 pyrochlore link directions = 16 total.
-    // Wrap each to the primitive cell so positions match what get_supercell_IDX returns.
+    // Sublattice positions (kagome: 3 sites per cell). Wrap each into the
+    // primitive cell so positions match what get_supercell_IDX returns. The
+    // index order (0,1,2) matches KagomeLayer()'s pyro_sl, hence the MC's
+    // sublattice-major layout — so "higher-sl" means the same thing here.
     vector<ipos_t> sl_pos;
-    sl_pos.reserve(16);
-    for (const auto& fcc : pyrochlore::fcc_Dy) {
-        for (const auto& x : pyrochlore::pyro) {
-            ipos_t pos = x + fcc;
-            lat.wrap_primitive(pos);
-            sl_pos.push_back(pos);
-        }
+    for (const auto& p : std::vector<ipos_t>{ {0,0,0}, {1,0,0}, {1,1,0} }) {
+        ipos_t pos = p;
+        lat.wrap_primitive(pos);
+        sl_pos.push_back(pos);
     }
-    const int n_sl = static_cast<int>(sl_pos.size()); // = 16
+    const int n_sl = static_cast<int>(sl_pos.size()); // = 3
 
     const int Nk           = lat.num_primitive_cells();
     const ivec3_t k_dims   = lat.size();
-    const auto bonds       = build_bonds(lat, sl_pos, J1, J2, J3, Delta);
+    const auto bonds       = build_bonds(lat, sl_pos, J, D_dm, d_dm);
 
     // -----------------------------------------------------------------------
-    // Sweep BZ: build M(k) and track minimum eigenvalue
+    // Sweep BZ: build M(k) and track the minimum eigenvalue.
     //
-    // For XXZ, J is a 3×3 matrix, so M(k) is (3·n_sl)×(3·n_sl) complex
-    // Hermitian. Block M[3α:3α+3, 3β:3β+3] accumulates J_bond·e^{ik·d}.
-    // Hermiticity follows from the directed-bond sweep: the reverse bond
-    // (β→α, disp=-d) contributes J_bond^T·e^{-ik·d} = M_αβ†.
+    // M(k) is (3·n_sl)×(3·n_sl) complex Hermitian; block M[3α:3α+3, 3β:3β+3]
+    // accumulates J_bond·e^{ik·d}. Hermiticity follows from the reverse bond
+    // (β→α, disp=−d, matrix Jᵀ) contributing the conjugate block.
     // -----------------------------------------------------------------------
     using MatC = Eigen::MatrixXcd;
     const int M_dim = 3 * n_sl;
@@ -177,13 +196,13 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Energy per spin: each undirected bond counted twice in M → factor of 1/2
+    // Energy per spin: each undirected bond is counted twice in M(k) → ½.
     const double E_per_spin = 0.5 * E_min;
 
     const auto k_star_vec = lat.wavevector_from_idx3(k_star_idx);
 
     printf("LT minimum: λ_min = %.6f  E/spin = %.6f\n", E_min, E_per_spin);
-    // Print per-sublattice weight: sum of |components|² over the 3 spin dofs
+    // Per-sublattice weight: sum of |components|² over the 3 spin dofs.
     printf("Eigvec sublattice |s_α|² :");
     for (int s = 0; s < n_sl; s++) {
         double w = norm(eigvec_star(3*s)) + norm(eigvec_star(3*s+1)) + norm(eigvec_star(3*s+2));
@@ -202,13 +221,13 @@ int main(int argc, char* argv[])
     // -----------------------------------------------------------------------
     // HDF5 output
     // -----------------------------------------------------------------------
-    
+
     // exit if no output file provided
     if (! prog.is_used("--output_dir")) return 0;
 
     stringstream name;
-    name << name_LJ123(prog);
-    auto file_path = outdir / (name.str() + "ltgs.out.h5");
+    name << name_LJ123(prog) << name_DM(prog);
+    auto file_path = outdir / (name.str() + "lt.out.h5");
 
     hid_t fid = H5Fcreate(file_path.string().c_str(),
                            H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
@@ -251,7 +270,7 @@ int main(int argc, char* argv[])
         H5Sclose(sp);
     }
 
-    // eigenvector [3*n_sl, 2] (re/im; rows ordered as [spin-x,y,z for sl-0, sl-1, ...])
+    // eigenvector [3*n_sl, 2] (re/im; rows ordered [spin-x,y,z for sl-0, sl-1, ...])
     {
         vector<double> ev(2 * M_dim);
         for (int s = 0; s < M_dim; s++) {
@@ -263,6 +282,20 @@ int main(int argc, char* argv[])
         hid_t ds = H5Dcreate2(fid, "eigenvector", H5T_NATIVE_DOUBLE, sp,
                                H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
         H5Dwrite(ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, ev.data());
+        H5Dclose(ds);
+        H5Sclose(sp);
+    }
+
+    // sl_positions [n_sl, 3]
+    {
+        vector<int64_t> sp_buf(3 * n_sl);
+        for (int s = 0; s < n_sl; s++)
+            for (int a = 0; a < 3; a++) sp_buf[3*s + a] = sl_pos[s][a];
+        hsize_t dims[2] = { static_cast<hsize_t>(n_sl), 3 };
+        hid_t sp = H5Screate_simple(2, dims, nullptr);
+        hid_t ds = H5Dcreate2(fid, "sl_positions", H5T_NATIVE_INT64, sp,
+                               H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+        H5Dwrite(ds, H5T_NATIVE_INT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, sp_buf.data());
         H5Dclose(ds);
         H5Sclose(sp);
     }
