@@ -83,7 +83,7 @@ ltgs_bin = executable('ltgs',
   install: true
   )
 
-py_scripts = ['ltgs_plot', 'ltgs_sweep', 'plot_dw_profile', 'plot_dw_order_params']
+py_scripts = ['ltgs_plot', 'ltgs_sweep', 'plot_obs', 'plot_dw_profile', 'plot_dw_order_params']
 script_dir = get_option('datadir') / 'kagome_cmc' / 'scripts'
 
 py_script_files = []
