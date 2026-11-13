@@ -49,7 +49,7 @@ struct HeisenbergSpin {
     vector3::vec3<double> S;
     std::vector<NeighbourSpins> bond_sets;
     // If true this spin is frozen: Metropolis/overrelaxation skip it. Used to
-    // impose Dirichlet boundary conditions that pin a domain wall (see DC.cpp).
+    // impose Dirichlet boundary conditions that pin a domain wall (see domain_wall.cpp).
     bool pinned = false;
 };
 

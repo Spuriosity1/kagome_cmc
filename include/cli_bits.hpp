@@ -67,9 +67,10 @@ inline auto declare_LJ123(argparse::ArgumentParser& prog){
 //     D1p = -D,   D1z = d*D,
 // i.e. --D sets the overall DM scale and --d the out-of-plane / in-plane ratio.
 //
-// NOTE: the DC protocol's single-ion anisotropy uses a separate flag, --D_sia
-// (see declare_cuboid_and_aniso), so there is no collision; declare_DM is used
-// only by anneal / AC_sus / ltgs (never DC).
+// NOTE: the domain_wall protocol's single-ion anisotropy uses a separate flag,
+// --D_sia (see declare_cuboid_and_aniso), so there is no collision with --D;
+// declare_DM is used by anneal / AC_sus / ltgs and by domain_wall, which shares
+// anneal's J1+DM model (only the supercell shape differs).
 inline void declare_DM(argparse::ArgumentParser& prog){
     prog.add_argument("--D")
         .help("Nearest-neighbour Dzyaloshinskii-Moriya strength (in-plane "
@@ -115,9 +116,10 @@ inline std::string name_DM(const argparse::ArgumentParser& prog){
 // Declares the single-ion easy-axis anisotropy options for the anneal / AC
 // protocols:  H += -D_sia * sum_i (S_i . axis)^2.  Default off (D_sia=0) so
 // existing runs are unchanged. These share the --D_sia / --easy_axis names used
-// by the DC protocol (declare_cuboid_and_aniso) but, since each binary builds its
-// own parser, there is no collision; they are kept separate because anneal does
-// not want DC's cuboid / pinning flags. NOTE: the on-site term breaks the
+// by the domain_wall protocol (declare_cuboid_and_aniso) but, since each binary
+// builds its own parser, there is no collision; they are kept separate because
+// anneal does not want domain_wall's cuboid / pinning flags. NOTE: the on-site
+// term breaks the
 // microcanonical overrelaxation step's detailed balance, so anneal must use the
 // pure-Metropolis sweep (sweep_metropolis), which it already does.
 inline void declare_single_ion_aniso(argparse::ArgumentParser& prog){
@@ -158,7 +160,7 @@ inline auto build_lat(const argparse::ArgumentParser& prog){
     return build_supercell(cell_spec, supercell_spec);
 }
 
-// Declares the extra options used by the DC / domain-wall protocol: independent
+// Declares the extra options used by the domain_wall protocol: independent
 // cuboid dimensions (each defaulting to the cubic L when unset), the by-hand
 // single-ion easy-axis anisotropy strength/axis, and the pinned-slab thickness.
 inline void declare_cuboid_and_aniso(argparse::ArgumentParser& prog){

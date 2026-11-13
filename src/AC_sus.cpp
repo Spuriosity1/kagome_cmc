@@ -178,7 +178,7 @@ int main (int argc, char *argv[]) {
 
     // Initialisation: two-domain seed — left half +z, right half -z — so the
     // run starts with a single domain wall near mid-x. Split on the integer
-    // x-coordinate (ipos[0]), matching DC.cpp. Note there is no pinning here,
+    // x-coordinate (ipos[0]), matching domain_wall.cpp. Note there is no pinning here,
     // so the wall is free to drift or annihilate during burn-in / annealing.
     int nx = 0;
     for (const auto& s : lat.get_objects<HeisenbergSpin>())

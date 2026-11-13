@@ -21,22 +21,33 @@ Geometry:
   thickness >= 2 makes the bulk behave as open-BC: wrap-around bonds across the
   x-seam only ever connect frozen spins.
 
-Hamiltonian:
-  H = sum_{<ij>_n} J_n S_i . S_j  -  B . sum_i S_i  -  D_sia sum_i (S_i . axis)^2
-  with the single-ion easy-axis anisotropy D_sia added by hand (--D_sia) so the discrete
-  wall can be pushed into the Bulaevskii-Ginzburg (narrow-wall) regime.
+Hamiltonian (identical model to the `anneal` program):
+  H = sum_{<ij>_n} J_n S_i . S_j
+      + sum_{<ij>_1} D_ij . (S_i x S_j)      (symmetry-adapted NN DMI, --D/--d)
+      - B . sum_i S_i
+      - D_sia sum_i (S_i . axis)^2           (single-ion easy axis, --D_sia)
+  The NN Heisenberg + Dzyaloshinskii-Moriya coupling is built by the SAME helper
+  (build_mc_run -> nn_coupling_per_bond) that anneal uses, so the per-bond J1+DM
+  matrices match bond-for-bond; only the supercell SHAPE differs (orthogonal
+  cuboid here vs. anneal's sheared L^3 cell) so an x-resolved profile is well
+  defined. The single-ion easy-axis term (--D_sia) is kept so the discrete wall
+  can be pushed into the Bulaevskii-Ginzburg (narrow-wall) regime.
 
 Protocol:
-  1. Build cuboid, define couplings, set anisotropy.
+  1. Build cuboid, define couplings (J + DMI), set anisotropy.
   2. Pin the end slabs and seed a two-domain (+z | -z) initial configuration.
   3. Burn in at T_hot, anneal T_hot -> T_sample (pure Metropolis, static field).
-  4. Sample the x-resolved magnetisation profile <S>(x) and net magnetisation.
+  4. Sample the x-resolved profiles of the two order parameters:
+       * the FM magnetisation along z, <S_z>(x), and
+       * the scalar spin chirality chi(x) = <S_i . (S_j x S_k)> over triangles.
 
 Output (HDF5):
-  /domain_wall/x        [nx]     integer x-slab coordinate (nx = 2*Lx)
-  /domain_wall/M        [nx,3]   slab-averaged <S> profile (column 2 = Mz = OP)
+  /domain_wall/x        [nx]     integer x-slab coordinate
+  /domain_wall/M        [nx,3]   slab-averaged <S> profile (column 2 = Mz = OP1)
+  /domain_wall/chi      [nx]     slab-averaged scalar spin chirality (OP2)
+  /domain_wall/chi_count[nx]     triangles per slab (0 => structurally empty slab)
   /domain_wall/M_net    [3]      net magnetisation per spin
-  /domain_wall/D, T_sample, Lx, Ly, Lz, pin_thickness, B[3], easy_axis[3]
+  /domain_wall/D_sia, D, d, T_sample, Lx, Ly, Lz, pin_thickness, B[3], easy_axis[3]
   /energy                        annealing energy trace
   /geometry                      lattice metadata
 */
@@ -48,7 +59,7 @@ using namespace CMC;
 int main (int argc, char *argv[]) {
     ///////////////////////////////////////////////////////////////////////////
     /// Setup and CLI
-    argparse::ArgumentParser prog("DC");
+    argparse::ArgumentParser prog("domain_wall");
 
     /// BOOK-KEEPING
     prog.add_argument("--output_dir", "-o")
@@ -96,6 +107,7 @@ int main (int argc, char *argv[]) {
 
     /// PHYSICS
     declare_LJ123(prog);          // positional L, --J1..--Jc1, -B
+    declare_DM(prog);             // --D, --d : NN Dzyaloshinskii-Moriya (matches anneal)
     declare_cuboid_and_aniso(prog); // --Lx/--Ly/--Lz, --D_sia, --easy_axis, --pin_thickness
 
     try {
@@ -128,10 +140,12 @@ int main (int argc, char *argv[]) {
                         "corrupted by wrap-around bonds.\n", pin_thickness);
 
     const double D = prog.get<double>("--D_sia");
+    const double D_dm = prog.get<double>("--D");   // NN DMI scale (matches anneal)
+    const double d_dm = prog.get<double>("--d");   // NN DMI out-of-plane ratio
     vector3::vec3d easy_axis = from_std_vector(prog.get<std::vector<double>>("--easy_axis"));
 
     auto lat = build_cuboid_lat(prog);
-    auto mc  = build_mc_run(prog, lat, seed);
+    auto mc  = build_mc_run(prog, lat, seed, D_dm, d_dm);
     mc.set_anisotropy(D, easy_axis);
 
     // Number of integer x-slabs, derived from the actual lattice (the supercell
@@ -158,8 +172,9 @@ int main (int argc, char *argv[]) {
     std::stringstream name;
     name << prog.get<std::string>("--prefix") << DELIM
          << name_LJ123(prog)
+         << name_DM(prog)
          << "Lx=" << Lx << ",Ly=" << Ly << ",Lz=" << Lz << DELIM
-         << "D="  << D << DELIM
+         << "Dsia=" << D << DELIM
          << "B="  << B_vec[0] << "," << B_vec[1] << "," << B_vec[2] << DELIM
          << "seed=" << seed << DELIM
          << "Tc=" << T_sample << DELIM
@@ -182,10 +197,10 @@ int main (int argc, char *argv[]) {
     }
 
     const size_t n_spins = lat.get_objects<HeisenbergSpin>().size();
-    printf("DC: Lx=%d Ly=%d Lz=%d  n_spins=%zu  pinned=%zu (thickness=%d)\n",
+    printf("domain_wall: Lx=%d Ly=%d Lz=%d  n_spins=%zu  pinned=%zu (thickness=%d)\n",
            Lx, Ly, Lz, n_spins, n_pinned, pin_thickness);
-    printf("    D=%.4g  easy_axis=(%.3g,%.3g,%.3g)  B=(%.3g,%.3g,%.3g)\n",
-           D, ehat[0], ehat[1], ehat[2], B[0], B[1], B[2]);
+    printf("    D_sia=%.4g  D_dm=%.4g  d_dm=%.4g  easy_axis=(%.3g,%.3g,%.3g)  B=(%.3g,%.3g,%.3g)\n",
+           D, D_dm, d_dm, ehat[0], ehat[1], ehat[2], B[0], B[1], B[2]);
     printf("    T_hot=%.3g  T_sample=%.3g  n_anneal=%zu  n_burn_in=%zu\n",
            T_hot, T_sample, n_anneal, n_burn_in);
 
@@ -226,12 +241,37 @@ int main (int argc, char *argv[]) {
     }
 
     ///////////////////////////////////////////////////////////////////////////
-    /// Stage 2: sample the x-resolved magnetisation profile
+    /// Register triangles for the scalar spin chirality profile
+    //
+    // Each primitive cell carries one up-triangle (sublattices 0,1,2). The
+    // per-triangle scalar chirality chi = S0 . (S1 x S2) is computed exactly as
+    // in order_manager (anneal's chirality order parameter); here we additionally
+    // bin each triangle by its x-slab (the cell-origin x, i.e. sublattice 0's
+    // integer x) so the chirality is spatially resolved along the wall normal.
+
+    struct Triangle { const vector3::vec3d* S[3]; int x; };
+    std::vector<Triangle> triangles;
+    for (auto&& [I, cell] : lat.enumerate_cells()) {
+        Triangle tri{{nullptr, nullptr, nullptr}, 0};
+        for (const auto& item : cell.enumerate_objects<HeisenbergSpin>()) {
+            tri.S[item.sublattice] = &(item.object->S);
+            if (item.sublattice == 0)
+                tri.x = static_cast<int>(item.object->ipos[0]);
+        }
+        triangles.push_back(tri);
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    /// Stage 2: sample the x-resolved order-parameter profiles
+    //   OP1: FM magnetisation <S_z>(x)       (prof, column 2)
+    //   OP2: scalar spin chirality  chi(x)   (chi_prof)
 
     printf("\nSampling domain-wall profile (%zu measurements)...\n", n_sample);
 
-    std::vector<double> prof(3 * nx, 0.0);     // summed <S> per slab
+    std::vector<double> prof(3 * nx, 0.0);      // summed <S> per slab
     std::vector<double> prof_cnt(nx, 0.0);      // accumulated spin count per slab
+    std::vector<double> chi_prof(nx, 0.0);      // summed scalar chirality per slab
+    std::vector<double> chi_cnt(nx, 0.0);       // accumulated triangle count per slab
     double m_net[3] = {0, 0, 0};
 
     for (size_t m = 0; m < n_sample; m++) {
@@ -248,12 +288,26 @@ int main (int argc, char *argv[]) {
             m_net[1] += s.S[1];
             m_net[2] += s.S[2];
         }
+
+        for (const auto& tri : triangles) {
+            const auto& s0 = *tri.S[0];
+            const auto& s1 = *tri.S[1];
+            const auto& s2 = *tri.S[2];
+            const double chi =
+                s0[0]*(s1[1]*s2[2] - s1[2]*s2[1]) +
+                s0[1]*(s1[2]*s2[0] - s1[0]*s2[2]) +
+                s0[2]*(s1[0]*s2[1] - s1[1]*s2[0]);
+            chi_prof[tri.x] += chi;
+            chi_cnt[tri.x]  += 1.0;
+        }
     }
 
-    // Normalise: per-slab average and net magnetisation per spin.
+    // Normalise: per-slab averages and net magnetisation per spin.
     for (int x = 0; x < nx; x++) {
         const double c = (prof_cnt[x] > 0) ? prof_cnt[x] : 1.0;
         prof[3*x+0] /= c;  prof[3*x+1] /= c;  prof[3*x+2] /= c;
+        const double ct = (chi_cnt[x] > 0) ? chi_cnt[x] : 1.0;
+        chi_prof[x] /= ct;
     }
     const double inv = 1.0 / (static_cast<double>(n_spins) * static_cast<double>(n_sample));
     m_net[0] *= inv;  m_net[1] *= inv;  m_net[2] *= inv;
@@ -302,7 +356,7 @@ int main (int argc, char *argv[]) {
             H5Dwrite(ds, H5T_NATIVE_INT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, xs.data());
             H5Dclose(ds); H5Sclose(sp);
         }
-        // Profile M[nx,3]
+        // Profile M[nx,3]  (OP1: column 2 is <S_z>)
         {
             const hsize_t d2[2] = {static_cast<hsize_t>(nx), 3};
             hid_t sp = H5Screate_simple(2, d2, nullptr);
@@ -311,13 +365,39 @@ int main (int argc, char *argv[]) {
             H5Dwrite(ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, prof.data());
             H5Dclose(ds); H5Sclose(sp);
         }
+        // Chirality profile chi[nx]  (OP2: scalar spin chirality per x-slab).
+        // Triangles are binned by their cell-origin x (sublattice 0), which only
+        // sits on even x, so odd slabs carry no triangle. chi_count[nx] records
+        // the per-slab triangle multiplicity so a plotter can mask the
+        // structurally-empty slabs (count==0) rather than read them as chi==0.
+        {
+            const hsize_t d = static_cast<hsize_t>(nx);
+            hid_t sp = H5Screate_simple(1, &d, nullptr);
+            hid_t ds = H5Dcreate2(grp, "chi", H5T_NATIVE_DOUBLE, sp,
+                                   H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+            H5Dwrite(ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, chi_prof.data());
+            H5Dclose(ds); H5Sclose(sp);
+        }
+        {
+            std::vector<int32_t> cnt(nx);
+            for (int x = 0; x < nx; x++)
+                cnt[x] = static_cast<int32_t>(std::llround(chi_cnt[x] / n_sample));
+            const hsize_t d = static_cast<hsize_t>(nx);
+            hid_t sp = H5Screate_simple(1, &d, nullptr);
+            hid_t ds = H5Dcreate2(grp, "chi_count", H5T_STD_I32LE, sp,
+                                   H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+            H5Dwrite(ds, H5T_NATIVE_INT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, cnt.data());
+            H5Dclose(ds); H5Sclose(sp);
+        }
 
         const double ax_arr[3] = {ehat[0], ehat[1], ehat[2]};
         const double B_arr[3]  = {B[0], B[1], B[2]};
         write_vec3("M_net", m_net);
         write_vec3("easy_axis", ax_arr);
         write_vec3("B", B_arr);
-        write_scalar_d("D", D);
+        write_scalar_d("D_sia", D);
+        write_scalar_d("D", D_dm);
+        write_scalar_d("d", d_dm);
         write_scalar_d("T_sample", T_sample);
         write_scalar_i("Lx", Lx);
         write_scalar_i("Ly", Ly);

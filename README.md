@@ -9,11 +9,14 @@ The following executables are provided:
   static structure factor (SSF) S(q) via FFT at chosen sample temperatures.
 - **`AC_sus`** — anneals to a target temperature, then drives the system with an
   oscillating field to measure the AC magnetic susceptibility χ′(ω) and χ″(ω).
-- **`DC`** — static-field protocol for **domain walls**: builds an orthogonal
-  cuboid elongated along the wall normal, pins the two end slabs to opposite
-  easy-axis directions, and measures the equilibrium magnetisation profile. Adds
-  a by-hand single-ion easy-axis anisotropy so the discrete wall can be driven
-  into the Bulaevskii–Ginzburg (narrow-wall) regime. Parameterised for Co₃Sn₂S₂.
+- **`domain_wall`** — static-field protocol for **domain walls**: builds an
+  orthogonal cuboid elongated along the wall normal, pins the two end slabs to
+  opposite easy-axis directions, and measures the equilibrium spatial profiles of
+  two order parameters — the FM magnetisation `⟨S_z⟩(x)` and the scalar spin
+  chirality `χ(x)`. Shares `anneal`'s full J + DMI model (only the supercell shape
+  differs) and adds a by-hand single-ion easy-axis anisotropy so the discrete wall
+  can be driven into the Bulaevskii–Ginzburg (narrow-wall) regime. Parameterised
+  for Co₃Sn₂S₂.
 - **`ltgs`** — zero-temperature **Luttinger–Tisza** solver: sweeps the Brillouin
   zone, diagonalising the Fourier-transformed coupling matrix to find the ordering
   wavevector `k*` and the LT lower-bound energy per spin. No Monte Carlo is run.
@@ -41,7 +44,7 @@ meson setup build
 meson compile -C build
 ```
 
-Outputs: `build/anneal`, `build/AC_sus`, `build/DC`, and `build/ltgs` (all installed).
+Outputs: `build/anneal`, `build/AC_sus`, `build/domain_wall`, and `build/ltgs` (all installed).
 
 ## Lattice
 
@@ -173,7 +176,7 @@ with `phase_i = ω·n_sweep·i`. Positive χ″ corresponds to absorption.
     --J1 1.0 --T_sample 0.1 --omega 0.05 --deltaB 0.01 0 0 --n_steps 2048
 ```
 
-### `DC` — static field / domain wall
+### `domain_wall` — static field / domain wall
 
 Builds an **orthogonal cuboid** supercell (independent `--Lx/--Ly/--Lz`, each
 defaulting to the positional `L`) elongated along **x**, the wall normal. The
@@ -184,22 +187,27 @@ the maximum bond range in x is 2 integer units, a pinned slab of thickness ≥ 2
 makes the bulk behave as open-BC (wrap-around bonds across the x-seam only ever
 connect frozen spins — no bond pruning needed).
 
-A by-hand single-ion easy-axis anisotropy is added:
+The Hamiltonian is **the same model `anneal` uses** — Heisenberg exchange plus
+the symmetry-adapted nearest-neighbour Dzyaloshinskii–Moriya term (`--D`, `--d`)
+— with a by-hand single-ion easy-axis anisotropy added (`--D_sia`):
 ```
-H = Σ_{<ij>_n} J_n S_i·S_j  −  B·Σ_i S_i  −  D Σ_i (S_i·ê)²     (ê = --easy_axis)
+H = Σ_{<ij>_n} J_n S_i·S_j  +  Σ_{<ij>_1} D_ij·(S_i×S_j)
+    −  B·Σ_i S_i  −  D_sia Σ_i (S_i·ê)²                    (ê = --easy_axis)
 ```
-`D>0` is easy-axis. All stages use **pure Metropolis** (`sweep_metropolis`, no
-overrelaxation), which is required for correct sampling once the on-site
+`D_sia>0` is easy-axis. All stages use **pure Metropolis** (`sweep_metropolis`,
+no overrelaxation), which is required for correct sampling once the on-site
 anisotropy term is present. The protocol burns in at `T_hot`, anneals to
-`T_sample` in the static field `B`, then averages the x-resolved profile ⟨S⟩(x)
-over `n_sample` measurements.
+`T_sample` in the static field `B`, then averages two x-resolved order-parameter
+profiles over `n_sample` measurements: the FM magnetisation **⟨S_z⟩(x)** and the
+scalar spin chirality **χ(x) = ⟨S_i·(S_j×S_k)⟩** (localised on the wall, switched
+on by the DMI).
 
 ```
-DC -o <output_dir> -s <seed> L <int>
+domain_wall -o <output_dir> -s <seed> L <int>
    [--Lx <int>] [--Ly <int>] [--Lz <int>]
-   [--J1 <f> … --Jc1 <f>] [-B <bx> <by> <bz>]
+   [--J1 <f> … --Jc1 <f>] [-B <bx> <by> <bz>] [--D <f>] [--d <f>]
    --T_sample <float>
-   [--D <float>] [--easy_axis <ex> <ey> <ez>] [--pin_thickness <int>]
+   [--D_sia <float>] [--easy_axis <ex> <ey> <ez>] [--pin_thickness <int>]
    [--T_hot <float>] [--T_ref <float>] [--n_anneal_steps <int>]
    [--n_burn_in <int>] [--n_sweep <int>] [--n_sample <int>]
    [--prefix <str>] [--save_state]
@@ -210,9 +218,10 @@ DC -o <output_dir> -s <seed> L <int>
 | `-o / --output_dir` | required | Directory for output files (must exist) |
 | `-s / --seed` | required | Seed index into the true-random cache (integer) |
 | `L`, `--J1 … --Jc1` | — / 0 | Fallback size and couplings (as for `anneal`) |
+| `--D / --d` | 0 / 0 | NN Dzyaloshinskii–Moriya strength / out-of-plane ratio (as for `anneal`) |
 | `--Lx / --Ly / --Lz` | `L` | Independent cuboid dimensions (cells); elongate `Lx` |
 | `--T_sample` | required | Target temperature for the profile measurement |
-| `--D` | 1.36 | Single-ion easy-axis anisotropy strength (meV) |
+| `--D_sia` | 1.36 | Single-ion easy-axis anisotropy strength (meV) |
 | `--easy_axis` | (0,0,1) | Easy-axis direction (need not be normalised) |
 | `--pin_thickness` | 2 | Thickness (integer x units) of each pinned end slab (≥ 2) |
 | `-B / --external_field` | (0,0,0) | Static (DC) field |
@@ -236,10 +245,10 @@ ferromagnet in this classical model and therefore supports a clean FM domain
 wall:
 
 ```bash
-# MFWF dominant-J1 FM set — moderate D (near the BG crossover)
-./build/DC -o results/ -s 0 4 --Lx 24 --Ly 3 --Lz 3 \
+# MFWF dominant-J1 FM set — moderate D_sia (near the BG crossover)
+./build/domain_wall -o results/ -s 0 4 --Lx 24 --Ly 3 --Lz 3 \
     --J1 -13.94 --J2 -0.94 --J3 -0.12 --Jd -0.12 --Jc1 -1.76 \
-    --D 5 --T_hot 40 --T_sample 3 --save_state
+    --D_sia 5 --T_hot 40 --T_sample 3 --save_state
 ```
 
 > **Caveat on the "Fits to SW spectra" set.** The paper's headline set
@@ -251,10 +260,10 @@ wall:
 > clean FM domain-wall study. Use a dominant-`J1` set for domain walls.
 
 **Bulaevskii–Ginzburg regime.** For an easy-axis ferromagnet the wall width
-scales as `δ ~ a·√(J_stiff/D)`, so the narrow (Ising) wall is reached when
-`D ≳ J_stiff` (the exchange stiffness along the wall normal). Scan `--D` (e.g.
-`1, 5, 10, 20, 40` meV) and watch the ⟨S_z⟩(x) transition collapse from many
-slabs to ~1–2 slabs.
+scales as `δ ~ a·√(J_stiff/D_sia)`, so the narrow (Ising) wall is reached when
+`D_sia ≳ J_stiff` (the exchange stiffness along the wall normal). Scan `--D_sia`
+(e.g. `1, 5, 10, 20, 40` meV) and watch the ⟨S_z⟩(x) transition collapse from
+many slabs to ~1–2 slabs.
 
 **Limitation.** The kagome bond model has no second-interlayer `Jc2`; the
 SW-fit set's small `Jc2=−1.70 meV` is omitted. Adding a `{{0,0,2}}` entry to
@@ -338,22 +347,26 @@ these must be applied downstream (see [Postprocessing](#postprocessing)).
 └── /geometry/                  lattice metadata (as above)
 ```
 
-### `DC` — `<params>.out.h5`
+### `domain_wall` — `<params>.out.h5`
 
 ```
 ├── /domain_wall/
 │   ├── x[nx]                   integer x-slab coordinate (nx = x-extent)
-│   ├── M[nx, 3]                slab-averaged ⟨S⟩ profile (column 2 = M_z = OP)
+│   ├── M[nx, 3]                slab-averaged ⟨S⟩ profile (column 2 = M_z = OP1)
+│   ├── chi[nx]                 slab-averaged scalar spin chirality (OP2)
+│   ├── chi_count[nx]           triangles per slab (0 ⇒ structurally empty slab)
 │   ├── M_net[3]                net magnetisation (per spin)
 │   ├── easy_axis[3], B[3]      easy-axis direction and static field
-│   ├── D, T_sample             scalars (double)
+│   ├── D_sia, D, d, T_sample   scalars (double): anisotropy, DMI strength/ratio
 │   └── Lx, Ly, Lz, pin_thickness   scalars (int)
 ├── /energy/                    annealing energy trace (as above)
 └── /geometry/                  lattice metadata (as above)
 ```
 
-The domain wall is read off the `M_z = M[:,2]` column as a function of `x`; its
-width (and hence the Bulaevskii–Ginzburg regime) follows from a `tanh` fit.
+The two order parameters are read off against `x`: the FM magnetisation
+`M_z = M[:,2]` (whose `tanh` width gives the Bulaevskii–Ginzburg regime) and the
+scalar spin chirality `chi` (mask `chi_count==0` slabs, which carry no triangle).
+Plot both with `results/plot_dw_order_params.py`.
 
 ### `ltgs` — `<params>lt.out.h5`
 
@@ -410,7 +423,7 @@ src/
   MC.cpp                  MC_runner implementation + HDF5 I/O
   anneal.cpp              Simulated annealing + SSF sampling
   AC_sus.cpp              AC susceptibility protocol
-  DC.cpp                  Static-field domain-wall protocol (cuboid + anisotropy)
+  domain_wall.cpp         Static-field domain-wall protocol (cuboid + DMI + anisotropy)
   luttinger_tisza.cpp     Luttinger–Tisza BZ sweep (ltgs); no MC, Eigen-based
 ```
 
@@ -419,10 +432,12 @@ src/
 - **Lattice:** kagome — 3 corner-sharing-triangle sublattices per cell, stacked
   along c for interlayer coupling.
 - **Hamiltonian:** H = Σ_{⟨ij⟩_n} J_n S_i · S_j − B · Σ_i S_i (isotropic
-  Heisenberg, in-plane up to third neighbours plus out-of-plane `Jc1`). The `DC`
-  protocol additionally adds a single-ion easy-axis term −D Σ_i (S_i·ê)².
+  Heisenberg, in-plane up to third neighbours plus out-of-plane `Jc1`, plus the
+  optional NN Dzyaloshinskii–Moriya term `+ Σ_{⟨ij⟩_1} D_ij·(S_i×S_j)`). The
+  `domain_wall` protocol additionally adds a single-ion easy-axis term
+  −D_sia Σ_i (S_i·ê)².
 - **Anisotropy & sampling:** with a single-ion term present, over-relaxation is
-  no longer microcanonical, so `DC` uses pure-Metropolis equilibration
+  no longer microcanonical, so `domain_wall` uses pure-Metropolis equilibration
   (`sweep_metropolis`). Spins flagged `pinned` are frozen (Dirichlet BCs).
 - **Metropolis proposal:** Gaussian kick in ℝ³ re-normalised to the unit sphere.
   Equilibration sweeps (`sweep_equilibrate`) use an adaptive width ∝ √(T/T_ref)

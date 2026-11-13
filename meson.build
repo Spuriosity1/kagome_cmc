@@ -66,7 +66,7 @@ AC_sus_bin = executable('AC_sus', files('src/AC_sus.cpp'),
   install: true
   )
 
-DC_bin = executable('DC', files('src/DC.cpp'),
+domain_wall_bin = executable('domain_wall', files('src/domain_wall.cpp'),
   dependencies: g_deps,
   link_with: mc_lib,
   include_directories: CMC_inc,
@@ -83,23 +83,25 @@ ltgs_bin = executable('ltgs',
   install: true
   )
 
-py_scripts = ['ltgs_plot', 'ltgs_sweep']
+py_scripts = ['ltgs_plot', 'ltgs_sweep', 'plot_dw_profile', 'plot_dw_order_params']
 script_dir = get_option('datadir') / 'kagome_cmc' / 'scripts'
+
+py_script_files = []
+foreach s : py_scripts
+  py_script_files += files('scripts' / s + '.py')
+endforeach
 
 if get_option('dev')
   # Point directly at the source tree so edits take effect without reinstalling.
   foreach s : py_scripts
     install_symlink(s,
-      pointing_to: meson.project_source_root() / 'results' / s + '.py',
+      pointing_to: meson.project_source_root() / 'scripts' / s + '.py',
       install_dir: get_option('bindir'),
     )
   endforeach
 else
   install_data(
-    files(
-      'results/ltgs_plot.py',
-      'results/ltgs_sweep.py',
-    ),
+    py_script_files,
     install_dir: script_dir,
     install_mode: 'rwxr-xr-x',
   )
