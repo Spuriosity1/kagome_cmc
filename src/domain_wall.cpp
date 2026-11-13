@@ -399,6 +399,11 @@ int main (int argc, char *argv[]) {
         write_scalar_d("D", D_dm);
         write_scalar_d("d", d_dm);
         write_scalar_d("T_sample", T_sample);
+        // Exchange couplings (every shell defined for the kagome lattice; a shell
+        // left off the command line is written as its 0 default, so a reader sees
+        // the full, unambiguous coupling set rather than guessing from the name).
+        for (const auto& [cn, _] : kagome::vecs)
+            write_scalar_d(cn.c_str(), prog.get<double>(cn));
         write_scalar_i("Lx", Lx);
         write_scalar_i("Ly", Ly);
         write_scalar_i("Lz", Lz);
